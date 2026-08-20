@@ -56,22 +56,14 @@ const JOIN_SOUND_FILE = path.join(process.cwd(), "bozos-tts-join.mp3");
 // Natural speech is the default. Per-server presets can override rate/pitch,
 // while Discord-side volume is handled separately so loudness is consistent.
 const TTS_VOICE_SETTINGS = {
-  rate: "+0%",
-  pitch: "+0Hz",
+  rate: "+4%",
+  pitch: "+10Hz",
   volume: "+0%",
   outputFormat: "audio-24khz-96kbitrate-mono-mp3",
   saveSubtitles: false,
   timeout: 30_000,
 };
 
-const VOICE_PRESETS = {
-  natural: { label: "Natural", rate: 0, pitch: 0 },
-  clear: { label: "Clear", rate: -2, pitch: 0 },
-  calm: { label: "Calm", rate: -8, pitch: -2 },
-  energetic: { label: "Energetic", rate: 8, pitch: 2 },
-  narrator: { label: "Narrator", rate: -10, pitch: -4 },
-  bright: { label: "Bright", rate: 4, pitch: 3 },
-};
 
 const VOICE_ACCENTS = {
   english: {
@@ -234,7 +226,6 @@ const DEFAULT_GUILD_SETTINGS = {
   serverLanguage: "english",
   serverAccent: "us",
   volume: 1,
-  voicePreset: "natural",
   // Kept for backward compatibility with older settings files.
   accent: "default",
   speakerMode: "smart",
@@ -354,13 +345,12 @@ function getLanguageVariants() {
 
 function getEffectiveVoiceSettings(guildId, userId = null) {
   const settings = getGuildSettings(guildId);
-  const preset = VOICE_PRESETS[settings.voicePreset] || VOICE_PRESETS.natural;
   return {
-    rate: `${preset.rate >= 0 ? "+" : ""}${preset.rate}%`,
-    pitch: `${preset.pitch >= 0 ? "+" : ""}${preset.pitch}Hz`,
-    volume: "+0%",
+    rate: TTS_VOICE_SETTINGS.rate,
+    pitch: TTS_VOICE_SETTINGS.pitch,
+    volume: TTS_VOICE_SETTINGS.volume,
     outputFormat: TTS_VOICE_SETTINGS.outputFormat,
-    saveSubtitles: false,
+    saveSubtitles: TTS_VOICE_SETTINGS.saveSubtitles,
     timeout: TTS_VOICE_SETTINGS.timeout,
     accent: getEffectiveAccent(guildId, userId),
     volumeMultiplier: settings.volume,
@@ -393,7 +383,6 @@ const HELP_CATEGORIES = {
       "`/leave` — Disconnect from the voice channel.\n" +
       "`/language` — Choose a server or personal language + regional accent.\n" +
       "`/volume` — Set playback volume from 0–200%.\n" +
-      "`/voice` — Choose a natural speech preset.\n" +
       "" +
       "`/skip` — Skip the current TTS message.\n\n" +
       "**Choose a category in the select menu to show commands.**",
@@ -558,9 +547,9 @@ const commands = [
       option
         .setName("scope")
         .setDescription("Who should this language apply to?")
-        .setRequired(false)
+        .setRequired(true)
         .addChoices(
-          { name: "Server default", value: "server" },
+          { name: "Server", value: "server" },
           { name: "Only me", value: "personal" },
         )
     ),
@@ -575,17 +564,6 @@ const commands = [
         .setMinValue(0)
         .setMaxValue(200)
         .setRequired(true)
-    ),
-
-  new SlashCommandBuilder()
-    .setName("voice")
-    .setDescription("Choose a natural voice preset")
-    .addStringOption((option) =>
-      option
-        .setName("preset")
-        .setDescription("Speech style")
-        .setRequired(true)
-        .addChoices(...Object.entries(VOICE_PRESETS).map(([value, preset]) => ({ name: preset.label, value })))
     ),
 
   new SlashCommandBuilder()
@@ -693,6 +671,7 @@ function createGuildState(guildId) {
     player,
     queue: [],
     currentJob: null,
+    currentResource: null,
     processing: false,
     skipRequested: false,
     emptyChannelTimer: null,
@@ -1195,6 +1174,7 @@ async function processGuildQueue(guildId, state) {
           silencePaddingFrames: 2,
         });
         resource.volume?.setVolume(settings.volume);
+        state.currentResource = resource;
 
         console.log(
           `[Latency] Message-to-playback: ${Math.round(performance.now() - job.messageReceivedAt)} ms`
@@ -1205,6 +1185,7 @@ async function processGuildQueue(guildId, state) {
         await waitForPlaybackToFinish(state.player);
 
         if (state.skipRequested) state.skipRequested = false;
+        state.currentResource = null;
       } catch (error) {
         const attempts = (job.attempts || 0) + 1;
         job.attempts = attempts;
@@ -1220,6 +1201,7 @@ async function processGuildQueue(guildId, state) {
         }
       } finally {
         if (audioPath) await fs.promises.unlink(audioPath).catch(() => {});
+        state.currentResource = null;
         state.currentJob = null;
       }
     }
@@ -1474,6 +1456,37 @@ client.once(
 );
 
 /* =========================================================
+   VOICE COMMAND ACCESS
+========================================================= */
+
+function requireSameVoiceChannel(interaction) {
+  const userChannelId = interaction.member?.voice?.channelId || null;
+  const botChannelId = getVoiceConnection(interaction.guildId)?.joinConfig?.channelId ||
+    guildStates.get(interaction.guildId)?.voiceChannelId || null;
+
+  if (!userChannelId) {
+    return "You need to be in a voice channel to use this command.";
+  }
+
+  if (!botChannelId) {
+    return "Bozos is not currently in a voice channel.";
+  }
+
+  if (userChannelId !== botChannelId) {
+    return "You need to be in the same voice channel as Bozos to use this command.";
+  }
+
+  return null;
+}
+
+function requireJoinVoiceChannel(interaction) {
+  if (!interaction.member?.voice?.channelId) {
+    return "You need to be in a voice channel to use /join.";
+  }
+  return null;
+}
+
+/* =========================================================
    INTERACTION HANDLER (Commands, Select Menus, & Buttons)
 ========================================================= */
 
@@ -1518,6 +1531,10 @@ client.on(
   async (interaction) => {
     // Handle Pagination Buttons for /language menu
     if (interaction.isButton() && interaction.customId.startsWith("lang_page_")) {
+      const voiceError = requireSameVoiceChannel(interaction);
+      if (voiceError) {
+        return interaction.reply({ content: `🔊 ${voiceError}`, flags: MessageFlags.Ephemeral });
+      }
       const [, , scope, page] = interaction.customId.split("_");
       const pageNum = parseInt(page, 10);
       const { components } = generateLanguageMenuComponents(pageNum, scope || "server");
@@ -1544,6 +1561,10 @@ client.on(
 
     // Handle Dropdown Selection for Language
     if (interaction.isStringSelectMenu() && interaction.customId.startsWith("lang_select_")) {
+      const voiceError = requireSameVoiceChannel(interaction);
+      if (voiceError) {
+        return interaction.reply({ content: `🔊 ${voiceError}`, flags: MessageFlags.Ephemeral });
+      }
       const [, , scope] = interaction.customId.split("_");
       const [selectedLanguage, selectedAccent] = String(interaction.values[0] || "").split("::");
       const languageConfig = LANGUAGE_CONFIGS[selectedLanguage];
@@ -1607,6 +1628,8 @@ client.on(
       interaction.commandName ===
       "join"
     ) {
+      const voiceError = requireJoinVoiceChannel(interaction);
+      if (voiceError) return replyWithV2(interaction, { title: "Voice Channel Required", description: voiceError, color: COLORS.ERROR, ephemeral: true });
       const voiceChannel =
         interaction.member
           ?.voice
@@ -1834,6 +1857,8 @@ client.on(
       interaction.commandName ===
       "leave"
     ) {
+      const voiceError = requireSameVoiceChannel(interaction);
+      if (voiceError) return replyWithV2(interaction, { title: "Voice Channel Required", description: voiceError, color: COLORS.ERROR, ephemeral: true });
       const state =
         guildStates.get(
           interaction.guildId
@@ -1894,7 +1919,9 @@ client.on(
     ----------------------------------------------------- */
 
     if (interaction.commandName === "language") {
-      const scope = interaction.options.getString("scope") || "server";
+      const voiceError = requireSameVoiceChannel(interaction);
+      if (voiceError) return replyWithV2(interaction, { title: "Voice Channel Required", description: voiceError, color: COLORS.ERROR, ephemeral: true });
+      const scope = interaction.options.getString("scope", true);
       const { components } = generateLanguageMenuComponents(0, scope);
       const currentSelection = getGuildLanguageSelection(
         interaction.guildId,
@@ -1919,12 +1946,19 @@ client.on(
     ----------------------------------------------------- */
 
     if (interaction.commandName === "volume") {
+      const voiceError = requireSameVoiceChannel(interaction);
+      if (voiceError) return replyWithV2(interaction, { title: "Voice Channel Required", description: voiceError, color: COLORS.ERROR, ephemeral: true });
       if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) {
         return replyWithV2(interaction, { title: "Permission Required", description: "You need **Manage Server** to change Bozos volume.", color: COLORS.ERROR, ephemeral: true });
       }
       const percent = interaction.options.getInteger("percent", true);
       const settings = getGuildSettings(interaction.guildId);
       settings.volume = percent / 100;
+
+      const state = guildStates.get(interaction.guildId);
+      if (state?.currentResource?.volume) {
+        state.currentResource.volume.setVolume(settings.volume);
+      }
 
       return replyWithV2(interaction, {
         title: "🔊 Volume Updated",
@@ -1934,30 +1968,12 @@ client.on(
     }
 
     /* -----------------------------------------------------
-       /VOICE
-    ----------------------------------------------------- */
-
-    if (interaction.commandName === "voice") {
-      if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) {
-        return replyWithV2(interaction, { title: "Permission Required", description: "You need **Manage Server** to change the server voice preset.", color: COLORS.ERROR, ephemeral: true });
-      }
-      const preset = interaction.options.getString("preset", true);
-      const settings = getGuildSettings(interaction.guildId);
-      settings.voicePreset = preset;
-
-      return replyWithV2(interaction, {
-        title: "🎙️ Voice Preset Updated",
-        description: `Bozos will use the **${VOICE_PRESETS[preset].label}** speech preset.\n\nThe default voice is deliberately neutral; the preset changes delivery rather than making speech artificially robotic.`,
-        color: COLORS.SUCCESS,
-      });
-    }
-
-
-    /* -----------------------------------------------------
        /SKIP
     ----------------------------------------------------- */
 
     if (interaction.commandName === "skip") {
+      const voiceError = requireSameVoiceChannel(interaction);
+      if (voiceError) return replyWithV2(interaction, { title: "Voice Channel Required", description: voiceError, color: COLORS.ERROR, ephemeral: true });
       const state = guildStates.get(interaction.guildId);
       if (!state?.currentJob) {
         return replyWithV2(interaction, {
@@ -1982,6 +1998,8 @@ client.on(
     ----------------------------------------------------- */
 
     if (interaction.commandName === "announce") {
+      const voiceError = requireSameVoiceChannel(interaction);
+      if (voiceError) return replyWithV2(interaction, { title: "Voice Channel Required", description: voiceError, color: COLORS.ERROR, ephemeral: true });
       if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) {
         return replyWithV2(interaction, { title: "Permission Required", description: "You need **Manage Server** to change announcement settings.", color: COLORS.ERROR, ephemeral: true });
       }
