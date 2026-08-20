@@ -1488,7 +1488,7 @@ function updateEmptyChannelTimer(guildId) {
   }
 
   console.log(
-    `[Voice] VC is empty in guild ${guildId}. Leaving in 30 seconds.`
+    `[Voice] VC is empty in guild ${guildId}. Leaving in 180 seconds.`
   );
 
   state.emptyChannelTimer =
@@ -1527,7 +1527,7 @@ function updateEmptyChannelTimer(guildId) {
       destroyGuildState(guildId);
 
       console.log(
-        `[Voice] Left guild ${guildId} after the VC remained empty for 30 seconds.`
+        `[Voice] Left guild ${guildId} after the VC remained empty for 180 seconds.`
       );
     }, EMPTY_CHANNEL_LEAVE_DELAY_MS);
 }
