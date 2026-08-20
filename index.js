@@ -2617,7 +2617,6 @@ client.on(
               : "This changes the server default neural voice.",
             `Language: **${languageLabel}**`,
             `Current voice: **${currentInfo.name} — ${currentInfo.gender}** (${locale})`,
-            "Rate and pitch stay on Bozos' normal default settings.",
           ].join("\n")
         ));
 
