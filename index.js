@@ -106,7 +106,7 @@ const VOICE_ACCENTS = {
     eg: "ar-EG-SalmaNeural",
   },
   hindi: { default: "hi-IN-SwaraNeural", in: "hi-IN-SwaraNeural" },
-  bengali: { default: "bn-IN-TanishaNeural", in: "bn-IN-TanishaNeural" },
+  bengali: { default: "bn-IN-TanishaaNeural", in: "bn-IN-TanishaaNeural" },
   tamil: { default: "ta-IN-PallaviNeural", in: "ta-IN-PallaviNeural" },
   telugu: { default: "te-IN-ShrutiNeural", in: "te-IN-ShrutiNeural" },
   marathi: { default: "mr-IN-AarohiNeural", in: "mr-IN-AarohiNeural" },
@@ -116,6 +116,9 @@ const VOICE_ACCENTS = {
   punjabi: { default: "pa-IN-VaaniNeural", in: "pa-IN-VaaniNeural" },
 };
 
+// Conservative Edge TTS voice list.
+// Keep only long-standing voices exposed by the Edge consumer TTS service;
+// newer Azure-only/less-consistent models are intentionally not shown in /voice.
 const VOICE_MODELS_BY_LOCALE = {
   "af-ZA": [
     { voice: "af-ZA-AdriNeural", gender: "Female" },
@@ -148,7 +151,6 @@ const VOICE_MODELS_BY_LOCALE = {
   "ca-ES": [
     { voice: "ca-ES-JoanaNeural", gender: "Female" },
     { voice: "ca-ES-EnricNeural", gender: "Male" },
-    { voice: "ca-ES-AlbaNeural", gender: "Female" },
   ],
   "cs-CZ": [
     { voice: "cs-CZ-VlastaNeural", gender: "Female" },
@@ -173,10 +175,6 @@ const VOICE_MODELS_BY_LOCALE = {
   "de-DE": [
     { voice: "de-DE-KatjaNeural", gender: "Female" },
     { voice: "de-DE-ConradNeural", gender: "Male" },
-    { voice: "de-DE-AmalaNeural", gender: "Female" },
-    { voice: "de-DE-BerndNeural", gender: "Male" },
-    { voice: "de-DE-ChristophNeural", gender: "Male" },
-    { voice: "de-DE-ElkeNeural", gender: "Female" },
   ],
   "el-GR": [
     { voice: "el-GR-AthinaNeural", gender: "Female" },
@@ -185,10 +183,6 @@ const VOICE_MODELS_BY_LOCALE = {
   "en-AU": [
     { voice: "en-AU-NatashaNeural", gender: "Female" },
     { voice: "en-AU-WilliamNeural", gender: "Male" },
-    { voice: "en-AU-CarlyNeural", gender: "Female" },
-    { voice: "en-AU-DarrenNeural", gender: "Male" },
-    { voice: "en-AU-FreyaNeural", gender: "Female" },
-    { voice: "en-AU-KenNeural", gender: "Male" },
   ],
   "en-CA": [
     { voice: "en-CA-ClaraNeural", gender: "Female" },
@@ -197,42 +191,22 @@ const VOICE_MODELS_BY_LOCALE = {
   "en-GB": [
     { voice: "en-GB-LibbyNeural", gender: "Female" },
     { voice: "en-GB-RyanNeural", gender: "Male" },
-    { voice: "en-GB-SoniaNeural", gender: "Female" },
-    { voice: "en-GB-AlfieNeural", gender: "Male" },
-    { voice: "en-GB-BellaNeural", gender: "Female" },
-    { voice: "en-GB-ElliotNeural", gender: "Male" },
   ],
   "en-IN": [
     { voice: "en-IN-NeerjaNeural", gender: "Female" },
     { voice: "en-IN-PrabhatNeural", gender: "Male" },
-    { voice: "en-IN-AartiNeural", gender: "Female" },
-    { voice: "en-IN-ArjunNeural", gender: "Male" },
-    { voice: "en-IN-AnanyaNeural", gender: "Female" },
-    { voice: "en-IN-KunalNeural", gender: "Male" },
   ],
   "en-US": [
     { voice: "en-US-JennyNeural", gender: "Female" },
     { voice: "en-US-GuyNeural", gender: "Male" },
-    { voice: "en-US-AriaNeural", gender: "Female" },
-    { voice: "en-US-DavisNeural", gender: "Male" },
-    { voice: "en-US-EmmaNeural", gender: "Female" },
-    { voice: "en-US-BrianNeural", gender: "Male" },
   ],
   "es-ES": [
     { voice: "es-ES-ElviraNeural", gender: "Female" },
     { voice: "es-ES-AlvaroNeural", gender: "Male" },
-    { voice: "es-ES-AbrilNeural", gender: "Female" },
-    { voice: "es-ES-ArnauNeural", gender: "Male" },
-    { voice: "es-ES-DarioNeural", gender: "Male" },
-    { voice: "es-ES-EstrellaNeural", gender: "Female" },
   ],
   "es-MX": [
     { voice: "es-MX-DaliaNeural", gender: "Female" },
     { voice: "es-MX-JorgeNeural", gender: "Male" },
-    { voice: "es-MX-BeatrizNeural", gender: "Female" },
-    { voice: "es-MX-GerardoNeural", gender: "Male" },
-    { voice: "es-MX-CandelaNeural", gender: "Female" },
-    { voice: "es-MX-CecilioNeural", gender: "Male" },
   ],
   "es-US": [
     { voice: "es-US-PalomaNeural", gender: "Female" },
@@ -247,9 +221,8 @@ const VOICE_MODELS_BY_LOCALE = {
     { voice: "fa-IR-FaridNeural", gender: "Male" },
   ],
   "fi-FI": [
-    { voice: "fi-FI-SelmaNeural", gender: "Female" },
-    { voice: "fi-FI-HarriNeural", gender: "Male" },
     { voice: "fi-FI-NooraNeural", gender: "Female" },
+    { voice: "fi-FI-HarriNeural", gender: "Male" },
   ],
   "fil-PH": [
     { voice: "fil-PH-BlessicaNeural", gender: "Female" },
@@ -258,16 +231,10 @@ const VOICE_MODELS_BY_LOCALE = {
   "fr-CA": [
     { voice: "fr-CA-SylvieNeural", gender: "Female" },
     { voice: "fr-CA-JeanNeural", gender: "Male" },
-    { voice: "fr-CA-AntoineNeural", gender: "Male" },
-    { voice: "fr-CA-ThierryNeural", gender: "Male" },
   ],
   "fr-FR": [
     { voice: "fr-FR-DeniseNeural", gender: "Female" },
     { voice: "fr-FR-HenriNeural", gender: "Male" },
-    { voice: "fr-FR-BrigitteNeural", gender: "Female" },
-    { voice: "fr-FR-ClaudeNeural", gender: "Male" },
-    { voice: "fr-FR-AlainNeural", gender: "Male" },
-    { voice: "fr-FR-CelesteNeural", gender: "Female" },
   ],
   "ga-IE": [
     { voice: "ga-IE-OrlaNeural", gender: "Female" },
@@ -284,10 +251,6 @@ const VOICE_MODELS_BY_LOCALE = {
   "hi-IN": [
     { voice: "hi-IN-SwaraNeural", gender: "Female" },
     { voice: "hi-IN-MadhurNeural", gender: "Male" },
-    { voice: "hi-IN-AnanyaNeural", gender: "Female" },
-    { voice: "hi-IN-AaravNeural", gender: "Male" },
-    { voice: "hi-IN-KavyaNeural", gender: "Female" },
-    { voice: "hi-IN-KunalNeural", gender: "Male" },
   ],
   "hr-HR": [
     { voice: "hr-HR-GabrijelaNeural", gender: "Female" },
@@ -303,19 +266,11 @@ const VOICE_MODELS_BY_LOCALE = {
   ],
   "it-IT": [
     { voice: "it-IT-ElsaNeural", gender: "Female" },
-    { voice: "it-IT-IsabellaNeural", gender: "Female" },
     { voice: "it-IT-DiegoNeural", gender: "Male" },
-    { voice: "it-IT-BenignoNeural", gender: "Male" },
-    { voice: "it-IT-CalimeroNeural", gender: "Male" },
-    { voice: "it-IT-FabiolaNeural", gender: "Female" },
   ],
   "ja-JP": [
     { voice: "ja-JP-NanamiNeural", gender: "Female" },
     { voice: "ja-JP-KeitaNeural", gender: "Male" },
-    { voice: "ja-JP-AoiNeural", gender: "Female" },
-    { voice: "ja-JP-DaichiNeural", gender: "Male" },
-    { voice: "ja-JP-MayuNeural", gender: "Female" },
-    { voice: "ja-JP-NaokiNeural", gender: "Male" },
   ],
   "kn-IN": [
     { voice: "kn-IN-SapnaNeural", gender: "Female" },
@@ -324,10 +279,6 @@ const VOICE_MODELS_BY_LOCALE = {
   "ko-KR": [
     { voice: "ko-KR-SunHiNeural", gender: "Female" },
     { voice: "ko-KR-InJoonNeural", gender: "Male" },
-    { voice: "ko-KR-BongJinNeural", gender: "Male" },
-    { voice: "ko-KR-GookMinNeural", gender: "Male" },
-    { voice: "ko-KR-JiMinNeural", gender: "Female" },
-    { voice: "ko-KR-SeoHyeonNeural", gender: "Female" },
   ],
   "lt-LT": [
     { voice: "lt-LT-OnaNeural", gender: "Female" },
@@ -352,34 +303,26 @@ const VOICE_MODELS_BY_LOCALE = {
   "nb-NO": [
     { voice: "nb-NO-PernilleNeural", gender: "Female" },
     { voice: "nb-NO-FinnNeural", gender: "Male" },
-    { voice: "nb-NO-IselinNeural", gender: "Female" },
   ],
   "nl-NL": [
     { voice: "nl-NL-FennaNeural", gender: "Female" },
     { voice: "nl-NL-MaartenNeural", gender: "Male" },
-    { voice: "nl-NL-ColetteNeural", gender: "Female" },
   ],
   "pa-IN": [
-    { voice: "pa-IN-OjasNeural", gender: "Male" },
     { voice: "pa-IN-VaaniNeural", gender: "Female" },
+    { voice: "pa-IN-OjasNeural", gender: "Male" },
   ],
   "pl-PL": [
-    { voice: "pl-PL-AgnieszkaNeural", gender: "Female" },
-    { voice: "pl-PL-MarekNeural", gender: "Male" },
     { voice: "pl-PL-ZofiaNeural", gender: "Female" },
+    { voice: "pl-PL-MarekNeural", gender: "Male" },
   ],
   "pt-BR": [
     { voice: "pt-BR-FranciscaNeural", gender: "Female" },
     { voice: "pt-BR-AntonioNeural", gender: "Male" },
-    { voice: "pt-BR-BrendaNeural", gender: "Female" },
-    { voice: "pt-BR-DonatoNeural", gender: "Male" },
-    { voice: "pt-BR-ElzaNeural", gender: "Female" },
-    { voice: "pt-BR-FabioNeural", gender: "Male" },
   ],
   "pt-PT": [
     { voice: "pt-PT-RaquelNeural", gender: "Female" },
     { voice: "pt-PT-DuarteNeural", gender: "Male" },
-    { voice: "pt-PT-FernandaNeural", gender: "Female" },
   ],
   "ro-RO": [
     { voice: "ro-RO-AlinaNeural", gender: "Female" },
@@ -388,7 +331,6 @@ const VOICE_MODELS_BY_LOCALE = {
   "ru-RU": [
     { voice: "ru-RU-SvetlanaNeural", gender: "Female" },
     { voice: "ru-RU-DmitryNeural", gender: "Male" },
-    { voice: "ru-RU-DariyaNeural", gender: "Female" },
   ],
   "sk-SK": [
     { voice: "sk-SK-ViktoriaNeural", gender: "Female" },
@@ -405,7 +347,6 @@ const VOICE_MODELS_BY_LOCALE = {
   "sv-SE": [
     { voice: "sv-SE-SofieNeural", gender: "Female" },
     { voice: "sv-SE-MattiasNeural", gender: "Male" },
-    { voice: "sv-SE-HilleviNeural", gender: "Female" },
   ],
   "sw-KE": [
     { voice: "sw-KE-ZuriNeural", gender: "Female" },
@@ -422,7 +363,6 @@ const VOICE_MODELS_BY_LOCALE = {
   "th-TH": [
     { voice: "th-TH-PremwadeeNeural", gender: "Female" },
     { voice: "th-TH-NiwatNeural", gender: "Male" },
-    { voice: "th-TH-AcharaNeural", gender: "Female" },
   ],
   "tr-TR": [
     { voice: "tr-TR-EmelNeural", gender: "Female" },
@@ -447,15 +387,10 @@ const VOICE_MODELS_BY_LOCALE = {
   "zh-CN": [
     { voice: "zh-CN-XiaoxiaoNeural", gender: "Female" },
     { voice: "zh-CN-YunxiNeural", gender: "Male" },
-    { voice: "zh-CN-XiaoyiNeural", gender: "Female" },
-    { voice: "zh-CN-YunjianNeural", gender: "Male" },
-    { voice: "zh-CN-YunyangNeural", gender: "Male" },
-    { voice: "zh-CN-XiaochenNeural", gender: "Female" },
   ],
   "zh-TW": [
     { voice: "zh-TW-HsiaoChenNeural", gender: "Female" },
     { voice: "zh-TW-YunJheNeural", gender: "Male" },
-    { voice: "zh-TW-HsiaoYuNeural", gender: "Female" },
   ],
   "zu-ZA": [
     { voice: "zu-ZA-ThandoNeural", gender: "Female" },
@@ -518,7 +453,7 @@ const LANGUAGE_CONFIGS = {
   portuguese: { label: "Portuguese", voice: "pt-BR-FranciscaNeural", lang: "pt-BR", prefix: (name) => `${name} disse...` },
   italian: { label: "Italian", voice: "it-IT-ElsaNeural", lang: "it-IT", prefix: (name) => `${name} ha detto...` },
   korean: { label: "Korean", voice: "ko-KR-SunHiNeural", lang: "ko-KR", prefix: (name) => `${name}님이 말씀하셨습니다...` },
-  bengali: { label: "Bengali", voice: "bn-IN-TanishaNeural", lang: "bn-IN", prefix: (name) => `${name} বলেছেন...` },
+  bengali: { label: "Bengali", voice: "bn-IN-TanishaaNeural", lang: "bn-IN", prefix: (name) => `${name} বলেছেন...` },
   turkish: { label: "Turkish", voice: "tr-TR-EmelNeural", lang: "tr-TR", prefix: (name) => `${name} dedi ki...` },
   vietnamese: { label: "Vietnamese", voice: "vi-VN-HoaiMyNeural", lang: "vi-VN", prefix: (name) => `${name} đã nói...` },
   polish: { label: "Polish", voice: "pl-PL-ZofiaNeural", lang: "pl-PL", prefix: (name) => `${name} powiedział...` },
@@ -704,6 +639,12 @@ function getVoiceModelsForLocale(locale) {
   return VOICE_MODELS_BY_LOCALE[locale] || [];
 }
 
+function isListedEdgeVoice(voice) {
+  if (!voice) return false;
+  const locale = getVoiceLocale(voice);
+  return getVoiceModelsForLocale(locale).some((entry) => entry.voice === voice);
+}
+
 function getVoicePersonaName(voice) {
   const parts = String(voice || "").split("-");
   const raw = parts.slice(2).join("-") || voice || "Default";
@@ -726,7 +667,11 @@ function getVoiceModelInfo(voice) {
 }
 
 function isVoiceCompatibleWithSelection(voice, selection) {
-  return Boolean(voice) && getVoiceLocale(voice) === getSelectionLocale(selection);
+  return (
+    Boolean(voice) &&
+    getVoiceLocale(voice) === getSelectionLocale(selection) &&
+    isListedEdgeVoice(voice)
+  );
 }
 
 function getEffectiveVoice(guildId, userId = null) {
@@ -744,7 +689,10 @@ function getEffectiveVoice(guildId, userId = null) {
     return settings.serverVoice;
   }
 
-  return getVoiceForLanguage(selection.language, selection.accent);
+  const defaultVoice = getVoiceForLanguage(selection.language, selection.accent);
+  if (isListedEdgeVoice(defaultVoice)) return defaultVoice;
+
+  return getVoiceModelsForLocale(getSelectionLocale(selection))[0]?.voice || defaultVoice;
 }
 
 function getEffectiveVoiceSettings(guildId, userId = null) {
