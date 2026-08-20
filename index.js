@@ -46,15 +46,15 @@ import ffmpegPath from "ffmpeg-static";
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 
 const MAX_MESSAGE_LENGTH = 500;
-const EMPTY_CHANNEL_LEAVE_DELAY_MS = 30_000;
+const EMPTY_CHANNEL_LEAVE_DELAY_MS = 180_000;
 const SPEAKER_REPEAT_WINDOW_MS = 8_000;
 const MAX_JOB_RETRIES = 3;
 const RETRY_DELAY_MS = 750;
 const MAX_VOLUME = 2.0;
 const JOIN_SOUND_FILE = path.join(process.cwd(), "bozos-tts-join.mp3");
 
-// Natural speech is the default. Per-server presets can override rate/pitch,
-// while Discord-side volume is handled separately so loudness is consistent.
+// Natural speech defaults stay fixed; /voice changes only the neural speaker model.
+// Discord-side volume is handled separately so loudness is consistent.
 const TTS_VOICE_SETTINGS = {
   rate: "+4%",
   pitch: "+10Hz",
@@ -117,6 +117,354 @@ const VOICE_ACCENTS = {
   malayalam: { default: "ml-IN-SobhanaNeural", in: "ml-IN-SobhanaNeural" },
   punjabi: { default: "pa-IN-VaaniNeural", in: "pa-IN-VaaniNeural" },
 };
+
+const VOICE_MODELS_BY_LOCALE = {
+  "af-ZA": [
+    { voice: "af-ZA-AdriNeural", gender: "Female" },
+    { voice: "af-ZA-WillemNeural", gender: "Male" },
+  ],
+  "am-ET": [
+    { voice: "am-ET-MekdesNeural", gender: "Female" },
+    { voice: "am-ET-AmehaNeural", gender: "Male" },
+  ],
+  "ar-AE": [
+    { voice: "ar-AE-FatimaNeural", gender: "Female" },
+    { voice: "ar-AE-HamdanNeural", gender: "Male" },
+  ],
+  "ar-EG": [
+    { voice: "ar-EG-SalmaNeural", gender: "Female" },
+    { voice: "ar-EG-ShakirNeural", gender: "Male" },
+  ],
+  "ar-SA": [
+    { voice: "ar-SA-ZariyahNeural", gender: "Female" },
+    { voice: "ar-SA-HamedNeural", gender: "Male" },
+  ],
+  "bg-BG": [
+    { voice: "bg-BG-KalinaNeural", gender: "Female" },
+    { voice: "bg-BG-BorislavNeural", gender: "Male" },
+  ],
+  "bn-IN": [
+    { voice: "bn-IN-TanishaaNeural", gender: "Female" },
+    { voice: "bn-IN-BashkarNeural", gender: "Male" },
+  ],
+  "ca-ES": [
+    { voice: "ca-ES-JoanaNeural", gender: "Female" },
+    { voice: "ca-ES-EnricNeural", gender: "Male" },
+    { voice: "ca-ES-AlbaNeural", gender: "Female" },
+  ],
+  "cs-CZ": [
+    { voice: "cs-CZ-VlastaNeural", gender: "Female" },
+    { voice: "cs-CZ-AntoninNeural", gender: "Male" },
+  ],
+  "cy-GB": [
+    { voice: "cy-GB-NiaNeural", gender: "Female" },
+    { voice: "cy-GB-AledNeural", gender: "Male" },
+  ],
+  "da-DK": [
+    { voice: "da-DK-ChristelNeural", gender: "Female" },
+    { voice: "da-DK-JeppeNeural", gender: "Male" },
+  ],
+  "de-AT": [
+    { voice: "de-AT-IngridNeural", gender: "Female" },
+    { voice: "de-AT-JonasNeural", gender: "Male" },
+  ],
+  "de-CH": [
+    { voice: "de-CH-LeniNeural", gender: "Female" },
+    { voice: "de-CH-JanNeural", gender: "Male" },
+  ],
+  "de-DE": [
+    { voice: "de-DE-KatjaNeural", gender: "Female" },
+    { voice: "de-DE-ConradNeural", gender: "Male" },
+    { voice: "de-DE-AmalaNeural", gender: "Female" },
+    { voice: "de-DE-BerndNeural", gender: "Male" },
+    { voice: "de-DE-ChristophNeural", gender: "Male" },
+    { voice: "de-DE-ElkeNeural", gender: "Female" },
+  ],
+  "el-GR": [
+    { voice: "el-GR-AthinaNeural", gender: "Female" },
+    { voice: "el-GR-NestorasNeural", gender: "Male" },
+  ],
+  "en-AU": [
+    { voice: "en-AU-NatashaNeural", gender: "Female" },
+    { voice: "en-AU-WilliamNeural", gender: "Male" },
+    { voice: "en-AU-CarlyNeural", gender: "Female" },
+    { voice: "en-AU-DarrenNeural", gender: "Male" },
+    { voice: "en-AU-FreyaNeural", gender: "Female" },
+    { voice: "en-AU-KenNeural", gender: "Male" },
+  ],
+  "en-CA": [
+    { voice: "en-CA-ClaraNeural", gender: "Female" },
+    { voice: "en-CA-LiamNeural", gender: "Male" },
+  ],
+  "en-GB": [
+    { voice: "en-GB-LibbyNeural", gender: "Female" },
+    { voice: "en-GB-RyanNeural", gender: "Male" },
+    { voice: "en-GB-SoniaNeural", gender: "Female" },
+    { voice: "en-GB-AlfieNeural", gender: "Male" },
+    { voice: "en-GB-BellaNeural", gender: "Female" },
+    { voice: "en-GB-ElliotNeural", gender: "Male" },
+  ],
+  "en-IN": [
+    { voice: "en-IN-NeerjaNeural", gender: "Female" },
+    { voice: "en-IN-PrabhatNeural", gender: "Male" },
+    { voice: "en-IN-AartiNeural", gender: "Female" },
+    { voice: "en-IN-ArjunNeural", gender: "Male" },
+    { voice: "en-IN-AnanyaNeural", gender: "Female" },
+    { voice: "en-IN-KunalNeural", gender: "Male" },
+  ],
+  "en-US": [
+    { voice: "en-US-JennyNeural", gender: "Female" },
+    { voice: "en-US-GuyNeural", gender: "Male" },
+    { voice: "en-US-AriaNeural", gender: "Female" },
+    { voice: "en-US-DavisNeural", gender: "Male" },
+    { voice: "en-US-EmmaNeural", gender: "Female" },
+    { voice: "en-US-BrianNeural", gender: "Male" },
+  ],
+  "es-ES": [
+    { voice: "es-ES-ElviraNeural", gender: "Female" },
+    { voice: "es-ES-AlvaroNeural", gender: "Male" },
+    { voice: "es-ES-AbrilNeural", gender: "Female" },
+    { voice: "es-ES-ArnauNeural", gender: "Male" },
+    { voice: "es-ES-DarioNeural", gender: "Male" },
+    { voice: "es-ES-EstrellaNeural", gender: "Female" },
+  ],
+  "es-MX": [
+    { voice: "es-MX-DaliaNeural", gender: "Female" },
+    { voice: "es-MX-JorgeNeural", gender: "Male" },
+    { voice: "es-MX-BeatrizNeural", gender: "Female" },
+    { voice: "es-MX-GerardoNeural", gender: "Male" },
+    { voice: "es-MX-CandelaNeural", gender: "Female" },
+    { voice: "es-MX-CecilioNeural", gender: "Male" },
+  ],
+  "es-US": [
+    { voice: "es-US-PalomaNeural", gender: "Female" },
+    { voice: "es-US-AlonsoNeural", gender: "Male" },
+  ],
+  "et-EE": [
+    { voice: "et-EE-AnuNeural", gender: "Female" },
+    { voice: "et-EE-KertNeural", gender: "Male" },
+  ],
+  "fa-IR": [
+    { voice: "fa-IR-DilaraNeural", gender: "Female" },
+    { voice: "fa-IR-FaridNeural", gender: "Male" },
+  ],
+  "fi-FI": [
+    { voice: "fi-FI-SelmaNeural", gender: "Female" },
+    { voice: "fi-FI-HarriNeural", gender: "Male" },
+    { voice: "fi-FI-NooraNeural", gender: "Female" },
+  ],
+  "fil-PH": [
+    { voice: "fil-PH-BlessicaNeural", gender: "Female" },
+    { voice: "fil-PH-AngeloNeural", gender: "Male" },
+  ],
+  "fr-CA": [
+    { voice: "fr-CA-SylvieNeural", gender: "Female" },
+    { voice: "fr-CA-JeanNeural", gender: "Male" },
+    { voice: "fr-CA-AntoineNeural", gender: "Male" },
+    { voice: "fr-CA-ThierryNeural", gender: "Male" },
+  ],
+  "fr-FR": [
+    { voice: "fr-FR-DeniseNeural", gender: "Female" },
+    { voice: "fr-FR-HenriNeural", gender: "Male" },
+    { voice: "fr-FR-BrigitteNeural", gender: "Female" },
+    { voice: "fr-FR-ClaudeNeural", gender: "Male" },
+    { voice: "fr-FR-AlainNeural", gender: "Male" },
+    { voice: "fr-FR-CelesteNeural", gender: "Female" },
+  ],
+  "ga-IE": [
+    { voice: "ga-IE-OrlaNeural", gender: "Female" },
+    { voice: "ga-IE-ColmNeural", gender: "Male" },
+  ],
+  "gu-IN": [
+    { voice: "gu-IN-DhwaniNeural", gender: "Female" },
+    { voice: "gu-IN-NiranjanNeural", gender: "Male" },
+  ],
+  "he-IL": [
+    { voice: "he-IL-HilaNeural", gender: "Female" },
+    { voice: "he-IL-AvriNeural", gender: "Male" },
+  ],
+  "hi-IN": [
+    { voice: "hi-IN-SwaraNeural", gender: "Female" },
+    { voice: "hi-IN-MadhurNeural", gender: "Male" },
+    { voice: "hi-IN-AnanyaNeural", gender: "Female" },
+    { voice: "hi-IN-AaravNeural", gender: "Male" },
+    { voice: "hi-IN-KavyaNeural", gender: "Female" },
+    { voice: "hi-IN-KunalNeural", gender: "Male" },
+  ],
+  "hr-HR": [
+    { voice: "hr-HR-GabrijelaNeural", gender: "Female" },
+    { voice: "hr-HR-SreckoNeural", gender: "Male" },
+  ],
+  "hu-HU": [
+    { voice: "hu-HU-NoemiNeural", gender: "Female" },
+    { voice: "hu-HU-TamasNeural", gender: "Male" },
+  ],
+  "id-ID": [
+    { voice: "id-ID-GadisNeural", gender: "Female" },
+    { voice: "id-ID-ArdiNeural", gender: "Male" },
+  ],
+  "it-IT": [
+    { voice: "it-IT-ElsaNeural", gender: "Female" },
+    { voice: "it-IT-IsabellaNeural", gender: "Female" },
+    { voice: "it-IT-DiegoNeural", gender: "Male" },
+    { voice: "it-IT-BenignoNeural", gender: "Male" },
+    { voice: "it-IT-CalimeroNeural", gender: "Male" },
+    { voice: "it-IT-FabiolaNeural", gender: "Female" },
+  ],
+  "ja-JP": [
+    { voice: "ja-JP-NanamiNeural", gender: "Female" },
+    { voice: "ja-JP-KeitaNeural", gender: "Male" },
+    { voice: "ja-JP-AoiNeural", gender: "Female" },
+    { voice: "ja-JP-DaichiNeural", gender: "Male" },
+    { voice: "ja-JP-MayuNeural", gender: "Female" },
+    { voice: "ja-JP-NaokiNeural", gender: "Male" },
+  ],
+  "kn-IN": [
+    { voice: "kn-IN-SapnaNeural", gender: "Female" },
+    { voice: "kn-IN-GaganNeural", gender: "Male" },
+  ],
+  "ko-KR": [
+    { voice: "ko-KR-SunHiNeural", gender: "Female" },
+    { voice: "ko-KR-InJoonNeural", gender: "Male" },
+    { voice: "ko-KR-BongJinNeural", gender: "Male" },
+    { voice: "ko-KR-GookMinNeural", gender: "Male" },
+    { voice: "ko-KR-JiMinNeural", gender: "Female" },
+    { voice: "ko-KR-SeoHyeonNeural", gender: "Female" },
+  ],
+  "lt-LT": [
+    { voice: "lt-LT-OnaNeural", gender: "Female" },
+    { voice: "lt-LT-LeonasNeural", gender: "Male" },
+  ],
+  "lv-LV": [
+    { voice: "lv-LV-EveritaNeural", gender: "Female" },
+    { voice: "lv-LV-NilsNeural", gender: "Male" },
+  ],
+  "ml-IN": [
+    { voice: "ml-IN-SobhanaNeural", gender: "Female" },
+    { voice: "ml-IN-MidhunNeural", gender: "Male" },
+  ],
+  "mr-IN": [
+    { voice: "mr-IN-AarohiNeural", gender: "Female" },
+    { voice: "mr-IN-ManoharNeural", gender: "Male" },
+  ],
+  "ms-MY": [
+    { voice: "ms-MY-YasminNeural", gender: "Female" },
+    { voice: "ms-MY-OsmanNeural", gender: "Male" },
+  ],
+  "nb-NO": [
+    { voice: "nb-NO-PernilleNeural", gender: "Female" },
+    { voice: "nb-NO-FinnNeural", gender: "Male" },
+    { voice: "nb-NO-IselinNeural", gender: "Female" },
+  ],
+  "nl-NL": [
+    { voice: "nl-NL-FennaNeural", gender: "Female" },
+    { voice: "nl-NL-MaartenNeural", gender: "Male" },
+    { voice: "nl-NL-ColetteNeural", gender: "Female" },
+  ],
+  "pa-IN": [
+    { voice: "pa-IN-OjasNeural", gender: "Male" },
+    { voice: "pa-IN-VaaniNeural", gender: "Female" },
+  ],
+  "pl-PL": [
+    { voice: "pl-PL-AgnieszkaNeural", gender: "Female" },
+    { voice: "pl-PL-MarekNeural", gender: "Male" },
+    { voice: "pl-PL-ZofiaNeural", gender: "Female" },
+  ],
+  "pt-BR": [
+    { voice: "pt-BR-FranciscaNeural", gender: "Female" },
+    { voice: "pt-BR-AntonioNeural", gender: "Male" },
+    { voice: "pt-BR-BrendaNeural", gender: "Female" },
+    { voice: "pt-BR-DonatoNeural", gender: "Male" },
+    { voice: "pt-BR-ElzaNeural", gender: "Female" },
+    { voice: "pt-BR-FabioNeural", gender: "Male" },
+  ],
+  "pt-PT": [
+    { voice: "pt-PT-RaquelNeural", gender: "Female" },
+    { voice: "pt-PT-DuarteNeural", gender: "Male" },
+    { voice: "pt-PT-FernandaNeural", gender: "Female" },
+  ],
+  "ro-RO": [
+    { voice: "ro-RO-AlinaNeural", gender: "Female" },
+    { voice: "ro-RO-EmilNeural", gender: "Male" },
+  ],
+  "ru-RU": [
+    { voice: "ru-RU-SvetlanaNeural", gender: "Female" },
+    { voice: "ru-RU-DmitryNeural", gender: "Male" },
+    { voice: "ru-RU-DariyaNeural", gender: "Female" },
+  ],
+  "sk-SK": [
+    { voice: "sk-SK-ViktoriaNeural", gender: "Female" },
+    { voice: "sk-SK-LukasNeural", gender: "Male" },
+  ],
+  "sl-SI": [
+    { voice: "sl-SI-PetraNeural", gender: "Female" },
+    { voice: "sl-SI-RokNeural", gender: "Male" },
+  ],
+  "sr-RS": [
+    { voice: "sr-RS-SophieNeural", gender: "Female" },
+    { voice: "sr-RS-NicholasNeural", gender: "Male" },
+  ],
+  "sv-SE": [
+    { voice: "sv-SE-SofieNeural", gender: "Female" },
+    { voice: "sv-SE-MattiasNeural", gender: "Male" },
+    { voice: "sv-SE-HilleviNeural", gender: "Female" },
+  ],
+  "sw-KE": [
+    { voice: "sw-KE-ZuriNeural", gender: "Female" },
+    { voice: "sw-KE-RafikiNeural", gender: "Male" },
+  ],
+  "ta-IN": [
+    { voice: "ta-IN-PallaviNeural", gender: "Female" },
+    { voice: "ta-IN-ValluvarNeural", gender: "Male" },
+  ],
+  "te-IN": [
+    { voice: "te-IN-ShrutiNeural", gender: "Female" },
+    { voice: "te-IN-MohanNeural", gender: "Male" },
+  ],
+  "th-TH": [
+    { voice: "th-TH-PremwadeeNeural", gender: "Female" },
+    { voice: "th-TH-NiwatNeural", gender: "Male" },
+    { voice: "th-TH-AcharaNeural", gender: "Female" },
+  ],
+  "tr-TR": [
+    { voice: "tr-TR-EmelNeural", gender: "Female" },
+    { voice: "tr-TR-AhmetNeural", gender: "Male" },
+  ],
+  "uk-UA": [
+    { voice: "uk-UA-PolinaNeural", gender: "Female" },
+    { voice: "uk-UA-OstapNeural", gender: "Male" },
+  ],
+  "ur-PK": [
+    { voice: "ur-PK-UzmaNeural", gender: "Female" },
+    { voice: "ur-PK-AsadNeural", gender: "Male" },
+  ],
+  "vi-VN": [
+    { voice: "vi-VN-HoaiMyNeural", gender: "Female" },
+    { voice: "vi-VN-NamMinhNeural", gender: "Male" },
+  ],
+  "yo-NG": [
+    { voice: "yo-NG-AbebiNeural", gender: "Female" },
+    { voice: "yo-NG-AbeoNeural", gender: "Male" },
+  ],
+  "zh-CN": [
+    { voice: "zh-CN-XiaoxiaoNeural", gender: "Female" },
+    { voice: "zh-CN-YunxiNeural", gender: "Male" },
+    { voice: "zh-CN-XiaoyiNeural", gender: "Female" },
+    { voice: "zh-CN-YunjianNeural", gender: "Male" },
+    { voice: "zh-CN-YunyangNeural", gender: "Male" },
+    { voice: "zh-CN-XiaochenNeural", gender: "Female" },
+  ],
+  "zh-TW": [
+    { voice: "zh-TW-HsiaoChenNeural", gender: "Female" },
+    { voice: "zh-TW-YunJheNeural", gender: "Male" },
+    { voice: "zh-TW-HsiaoYuNeural", gender: "Female" },
+  ],
+  "zu-ZA": [
+    { voice: "zu-ZA-ThandoNeural", gender: "Female" },
+    { voice: "zu-ZA-ThembaNeural", gender: "Male" },
+  ],
+};
+
 
 const EMOJI_SPOKEN_NAMES = new Map([
   ["😂", "laughing"], ["🤣", "rolling laughing"], ["😭", "crying"],
@@ -236,6 +584,8 @@ const DEFAULT_GUILD_SETTINGS = {
   },
   userLanguages: {},
   userAccents: {},
+  serverVoice: null,
+  userVoices: {},
 };
 
 function cloneDefaultSettings() {
@@ -343,6 +693,62 @@ function getLanguageVariants() {
   return variants;
 }
 
+function getVoiceLocale(voice) {
+  return String(voice || "").split("-").slice(0, 2).join("-");
+}
+
+function getSelectionLocale(selection) {
+  const baseVoice = getVoiceForLanguage(selection.language, selection.accent);
+  return getVoiceLocale(baseVoice);
+}
+
+function getVoiceModelsForLocale(locale) {
+  return VOICE_MODELS_BY_LOCALE[locale] || [];
+}
+
+function getVoicePersonaName(voice) {
+  const parts = String(voice || "").split("-");
+  const raw = parts.slice(2).join("-") || voice || "Default";
+  return raw
+    .replace(/IndicNeural$/i, " Indic")
+    .replace(/MultilingualNeural$/i, " Multilingual")
+    .replace(/Neural$/i, "")
+    .trim();
+}
+
+function getVoiceModelInfo(voice) {
+  const locale = getVoiceLocale(voice);
+  const model = getVoiceModelsForLocale(locale).find((entry) => entry.voice === voice);
+  return {
+    voice,
+    locale,
+    name: getVoicePersonaName(voice),
+    gender: model?.gender || "Neural",
+  };
+}
+
+function isVoiceCompatibleWithSelection(voice, selection) {
+  return Boolean(voice) && getVoiceLocale(voice) === getSelectionLocale(selection);
+}
+
+function getEffectiveVoice(guildId, userId = null) {
+  const settings = getGuildSettings(guildId);
+  const selection = getGuildLanguageSelection(guildId, userId);
+
+  if (userId) {
+    const personalVoice = settings.userVoices?.[userId];
+    if (isVoiceCompatibleWithSelection(personalVoice, selection)) {
+      return personalVoice;
+    }
+  }
+
+  if (isVoiceCompatibleWithSelection(settings.serverVoice, selection)) {
+    return settings.serverVoice;
+  }
+
+  return getVoiceForLanguage(selection.language, selection.accent);
+}
+
 function getEffectiveVoiceSettings(guildId, userId = null) {
   const settings = getGuildSettings(guildId);
   return {
@@ -382,6 +788,7 @@ const HELP_CATEGORIES = {
       "`/join` — Join your current voice channel.\n" +
       "`/leave` — Disconnect from the voice channel.\n" +
       "`/language` — Choose a server or personal language + regional accent.\n" +
+      "`/voice` — Choose a male or female neural voice for the active language.\n" +
       "`/volume` — Set playback volume from 0–200%.\n" +
       "" +
       "`/skip` — Skip the current TTS message.\n\n" +
@@ -547,6 +954,20 @@ const commands = [
       option
         .setName("scope")
         .setDescription("Who should this language apply to?")
+        .setRequired(true)
+        .addChoices(
+          { name: "Server", value: "server" },
+          { name: "Only me", value: "personal" },
+        )
+    ),
+
+  new SlashCommandBuilder()
+    .setName("voice")
+    .setDescription("Choose a neural voice for the current language and accent")
+    .addStringOption((option) =>
+      option
+        .setName("scope")
+        .setDescription("Who should this voice apply to?")
         .setRequired(true)
         .addChoices(
           { name: "Server", value: "server" },
@@ -758,7 +1179,7 @@ async function generateTtsFile(text, guildId, userId = null) {
   const languageKey = getGuildLanguage(guildId, userId);
   const languageConfig = getGuildLanguageConfig(guildId, userId);
   const voiceSettings = getEffectiveVoiceSettings(guildId, userId);
-  const voice = getVoiceForLanguage(languageKey, voiceSettings.accent);
+  const voice = getEffectiveVoice(guildId, userId);
   const { accent, volumeMultiplier, ...ttsSettings } = voiceSettings;
 
   const voiceLocale = voice.split("-").slice(0, 2).join("-");
@@ -793,6 +1214,77 @@ async function generateTtsFile(text, guildId, userId = null) {
   } catch (error) {
     await fs.promises.unlink(outputPath).catch(() => {});
     throw error;
+  }
+}
+
+/* =========================================================
+   TOP.GG STATS
+========================================================= */
+
+async function updateTopGGStats() {
+  try {
+    if (!process.env.TOPGG_TOKEN) {
+      console.warn("[Top.gg] TOPGG_TOKEN is missing.");
+      return;
+    }
+
+    // Only shard 0 should post stats
+    if (client.shard && !client.shard.ids.includes(0)) {
+      return;
+    }
+
+    let serverCount;
+    let shardCount;
+
+    if (client.shard) {
+      // Get guild counts from ALL shards
+      const guildCounts = await client.shard.fetchClientValues(
+        "guilds.cache.size"
+      );
+
+      serverCount = guildCounts.reduce(
+        (total, count) => total + count,
+        0
+      );
+
+      shardCount = guildCounts.length;
+    } else {
+      // Fallback if running without sharding
+      serverCount = client.guilds.cache.size;
+      shardCount = 1;
+    }
+
+    const response = await fetch(
+      "https://top.gg/api/v1/projects/@me/metrics",
+      {
+        method: "PATCH",
+        headers: {
+          Authorization: `Bearer ${process.env.TOPGG_TOKEN}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          server_count: serverCount,
+          shard_count: shardCount,
+        }),
+      }
+    );
+
+    if (!response.ok) {
+      const error = await response.text();
+
+      console.error(
+        `[Top.gg] Failed to update stats: ${response.status}`,
+        error
+      );
+
+      return;
+    }
+
+    console.log(
+      `[Top.gg] Updated stats | Servers: ${serverCount} | Shards: ${shardCount}`
+    );
+  } catch (error) {
+    console.error("[Top.gg] Stats update error:", error);
   }
 }
 
@@ -1560,6 +2052,54 @@ function generateLanguageMenuComponents(page = 0, scope = "server") {
   return { components: [rowMenu, rowButtons], currentPage, totalPages };
 }
 
+function generateVoiceMenuComponents(guildId, userId, scope = "server") {
+  const targetUserId = scope === "personal" ? userId : null;
+  const selection = getGuildLanguageSelection(guildId, targetUserId);
+  const locale = getSelectionLocale(selection);
+  const voices = getVoiceModelsForLocale(locale);
+
+  if (!voices.length) {
+    const fallback = getVoiceForLanguage(selection.language, selection.accent);
+    return {
+      locale,
+      selection,
+      voices: [{ voice: fallback, gender: "Neural" }],
+      components: [
+        new ActionRowBuilder().addComponents(
+          new StringSelectMenuBuilder()
+            .setCustomId(`voice_select_${scope}`)
+            .setPlaceholder("Select neural voice")
+            .addOptions(
+              new StringSelectMenuOptionBuilder()
+                .setLabel(`${getVoicePersonaName(fallback)} — Neural`)
+                .setValue(fallback)
+                .setDescription(`${locale} • Default voice`)
+            )
+        ),
+      ],
+    };
+  }
+
+  const menu = new StringSelectMenuBuilder()
+    .setCustomId(`voice_select_${scope}`)
+    .setPlaceholder(`Select ${locale} voice`)
+    .addOptions(
+      voices.map((entry) =>
+        new StringSelectMenuOptionBuilder()
+          .setLabel(`${getVoicePersonaName(entry.voice)} — ${entry.gender}`)
+          .setValue(entry.voice)
+          .setDescription(`${locale} • ${entry.gender} neural voice`)
+      )
+    );
+
+  return {
+    locale,
+    selection,
+    voices,
+    components: [new ActionRowBuilder().addComponents(menu)],
+  };
+}
+
 
 client.on(
   Events.InteractionCreate,
@@ -1617,9 +2157,17 @@ client.on(
       if (scope === "personal") {
         settings.userLanguages[interaction.user.id] = selectedLanguage;
         settings.userAccents[interaction.user.id] = selectedAccent;
+        const newSelection = { language: selectedLanguage, accent: selectedAccent };
+        if (!isVoiceCompatibleWithSelection(settings.userVoices[interaction.user.id], newSelection)) {
+          delete settings.userVoices[interaction.user.id];
+        }
       } else {
         settings.serverLanguage = selectedLanguage;
         settings.serverAccent = selectedAccent;
+        const newSelection = { language: selectedLanguage, accent: selectedAccent };
+        if (!isVoiceCompatibleWithSelection(settings.serverVoice, newSelection)) {
+          settings.serverVoice = null;
+        }
       }
 
       const selectedLabel = getLanguageVariantLabel(selectedLanguage, selectedAccent);
@@ -1633,6 +2181,63 @@ client.on(
         ],
       }).catch(() => {});
       return;
+    }
+
+    // Handle neural voice selection for /voice
+    if (interaction.isStringSelectMenu() && interaction.customId.startsWith("voice_select_")) {
+      const voiceError = requireSameVoiceChannel(interaction);
+      if (voiceError) {
+        return interaction.reply({ content: `🔊 ${voiceError}`, flags: MessageFlags.Ephemeral });
+      }
+
+      const scope = interaction.customId.slice("voice_select_".length) || "server";
+      const targetUserId = scope === "personal" ? interaction.user.id : null;
+      const selection = getGuildLanguageSelection(interaction.guildId, targetUserId);
+      const locale = getSelectionLocale(selection);
+      const selectedVoice = String(interaction.values?.[0] || "");
+      const availableVoices = getVoiceModelsForLocale(locale);
+      const isAvailable = availableVoices.length
+        ? availableVoices.some((entry) => entry.voice === selectedVoice)
+        : selectedVoice === getVoiceForLanguage(selection.language, selection.accent);
+
+      if (!isAvailable || !isVoiceCompatibleWithSelection(selectedVoice, selection)) {
+        return interaction.reply({
+          content: "That voice no longer matches the selected language/accent. Run `/voice` again.",
+          flags: MessageFlags.Ephemeral,
+        });
+      }
+
+      const settings = getGuildSettings(interaction.guildId);
+      const currentVoice = getEffectiveVoice(interaction.guildId, targetUserId);
+      const selectedInfo = getVoiceModelInfo(selectedVoice);
+
+      if (currentVoice === selectedVoice) {
+        return interaction.update({
+          components: [
+            new ContainerBuilder()
+              .setAccentColor(COLORS.WARNING)
+              .addTextDisplayComponents((td) => td.setContent(
+                `## 🎙️ Voice Already Selected\n${scope === "personal" ? "Your personal" : "Server default"} voice is already **${selectedInfo.name} (${selectedInfo.gender})**.`
+              )),
+          ],
+        }).catch(() => {});
+      }
+
+      if (scope === "personal") {
+        settings.userVoices[interaction.user.id] = selectedVoice;
+      } else {
+        settings.serverVoice = selectedVoice;
+      }
+
+      return interaction.update({
+        components: [
+          new ContainerBuilder()
+            .setAccentColor(COLORS.SUCCESS)
+            .addTextDisplayComponents((td) => td.setContent(
+              `## ✅ Voice Updated\n${scope === "personal" ? "Your personal" : "Server default"} voice is now **${selectedInfo.name} — ${selectedInfo.gender}** (${selectedInfo.locale}).`
+            )),
+        ],
+      }).catch(() => {});
     }
 
     if (
@@ -1968,6 +2573,52 @@ client.on(
         .setAccentColor(COLORS.INFO)
         .addTextDisplayComponents((td) => td.setContent(
           `## 🌐 Choose Bozos TTS Language\n${scope === "personal" ? "Choose your personal language and accent" : "Choose the server default language and accent"}. Current: **${currentLabel}**`
+        ));
+
+      return interaction.reply({
+        components: [menuContainer, ...components],
+        flags: MessageFlags.IsComponentsV2 | MessageFlags.Ephemeral,
+      });
+    }
+
+    /* -----------------------------------------------------
+       /VOICE
+    ----------------------------------------------------- */
+
+    if (interaction.commandName === "voice") {
+      const voiceError = requireSameVoiceChannel(interaction);
+      if (voiceError) {
+        return replyWithV2(interaction, {
+          title: "Voice Channel Required",
+          description: voiceError,
+          color: COLORS.ERROR,
+          ephemeral: true,
+        });
+      }
+
+      const scope = interaction.options.getString("scope", true);
+      const targetUserId = scope === "personal" ? interaction.user.id : null;
+      const { components, locale, selection } = generateVoiceMenuComponents(
+        interaction.guildId,
+        interaction.user.id,
+        scope
+      );
+      const currentVoice = getEffectiveVoice(interaction.guildId, targetUserId);
+      const currentInfo = getVoiceModelInfo(currentVoice);
+      const languageLabel = getLanguageVariantLabel(selection.language, selection.accent);
+
+      const menuContainer = new ContainerBuilder()
+        .setAccentColor(COLORS.INFO)
+        .addTextDisplayComponents((td) => td.setContent(
+          [
+            "## 🎙️ Choose Bozos TTS Voice",
+            scope === "personal"
+              ? "This changes your personal neural voice only."
+              : "This changes the server default neural voice.",
+            `Language: **${languageLabel}**`,
+            `Current voice: **${currentInfo.name} — ${currentInfo.gender}** (${locale})`,
+            "Rate and pitch stay on Bozos' normal default settings.",
+          ].join("\n")
         ));
 
       return interaction.reply({
