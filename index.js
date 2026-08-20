@@ -35,8 +35,6 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
-import { spawn } from "node:child_process";
-import ffmpegPath from "ffmpeg-static";
 
 
 /* =========================================================
@@ -1137,41 +1135,6 @@ function clearEmptyChannelTimer(state) {
    EDGE TTS
 ========================================================= */
 
-async function normalizeLoudness(inputPath) {
-  if (!ffmpegPath) return inputPath;
-
-  const outputPath = path.join(
-    os.tmpdir(),
-    `bozos-normalized-${crypto.randomUUID()}.mp3`
-  );
-
-  await new Promise((resolve, reject) => {
-    const ffmpeg = spawn(ffmpegPath, [
-      "-hide_banner",
-      "-loglevel", "error",
-      "-y",
-      "-i", inputPath,
-      "-af", "loudnorm=I=-16:TP=-1.5:LRA=11",
-      "-ar", "24000",
-      "-ac", "1",
-      "-codec:a", "libmp3lame",
-      "-b:a", "96k",
-      outputPath,
-    ]);
-
-    let stderr = "";
-    ffmpeg.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
-    ffmpeg.on("error", reject);
-    ffmpeg.on("close", (code) => {
-      if (code === 0) return resolve();
-      reject(new Error(`FFmpeg loudness normalization failed (${code}): ${stderr.trim()}`));
-    });
-  });
-
-  await fs.promises.unlink(inputPath).catch(() => {});
-  return outputPath;
-}
-
 async function generateTtsFile(text, guildId, userId = null) {
   const cleanText = String(text || "").trim();
   if (!cleanText) throw new Error("TTS text cannot be empty.");
@@ -1203,88 +1166,16 @@ async function generateTtsFile(text, guildId, userId = null) {
       throw new Error("Edge TTS generated an empty audio file.");
     }
 
-    const normalizedPath = await normalizeLoudness(outputPath);
     const elapsed = Math.round(performance.now() - startedAt);
 
     console.log(
       `[TTS] Generated ${languageConfig.label} / ${voice} audio in ${elapsed} ms.`
     );
 
-    return normalizedPath;
+    return outputPath;
   } catch (error) {
     await fs.promises.unlink(outputPath).catch(() => {});
     throw error;
-  }
-}
-
-/* =========================================================
-   TOP.GG STATS
-========================================================= */
-
-async function updateTopGGStats() {
-  try {
-    if (!process.env.TOPGG_TOKEN) {
-      console.warn("[Top.gg] TOPGG_TOKEN is missing.");
-      return;
-    }
-
-    // Only shard 0 should post stats
-    if (client.shard && !client.shard.ids.includes(0)) {
-      return;
-    }
-
-    let serverCount;
-    let shardCount;
-
-    if (client.shard) {
-      // Get guild counts from ALL shards
-      const guildCounts = await client.shard.fetchClientValues(
-        "guilds.cache.size"
-      );
-
-      serverCount = guildCounts.reduce(
-        (total, count) => total + count,
-        0
-      );
-
-      shardCount = guildCounts.length;
-    } else {
-      // Fallback if running without sharding
-      serverCount = client.guilds.cache.size;
-      shardCount = 1;
-    }
-
-    const response = await fetch(
-      "https://top.gg/api/v1/projects/@me/metrics",
-      {
-        method: "PATCH",
-        headers: {
-          Authorization: `Bearer ${process.env.TOPGG_TOKEN}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          server_count: serverCount,
-          shard_count: shardCount,
-        }),
-      }
-    );
-
-    if (!response.ok) {
-      const error = await response.text();
-
-      console.error(
-        `[Top.gg] Failed to update stats: ${response.status}`,
-        error
-      );
-
-      return;
-    }
-
-    console.log(
-      `[Top.gg] Updated stats | Servers: ${serverCount} | Shards: ${shardCount}`
-    );
-  } catch (error) {
-    console.error("[Top.gg] Stats update error:", error);
   }
 }
 
@@ -2617,6 +2508,7 @@ client.on(
               : "This changes the server default neural voice.",
             `Language: **${languageLabel}**`,
             `Current voice: **${currentInfo.name} — ${currentInfo.gender}** (${locale})`,
+            "Rate and pitch stay on Bozos' normal default settings.",
           ].join("\n")
         ));
 
