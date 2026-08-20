@@ -113,7 +113,6 @@ const VOICE_ACCENTS = {
   gujarati: { default: "gu-IN-DhwaniNeural", in: "gu-IN-DhwaniNeural" },
   kannada: { default: "kn-IN-SapnaNeural", in: "kn-IN-SapnaNeural" },
   malayalam: { default: "ml-IN-SobhanaNeural", in: "ml-IN-SobhanaNeural" },
-  punjabi: { default: "pa-IN-VaaniNeural", in: "pa-IN-VaaniNeural" },
 };
 
 // Conservative Edge TTS voice list.
@@ -308,10 +307,6 @@ const VOICE_MODELS_BY_LOCALE = {
     { voice: "nl-NL-FennaNeural", gender: "Female" },
     { voice: "nl-NL-MaartenNeural", gender: "Male" },
   ],
-  "pa-IN": [
-    { voice: "pa-IN-VaaniNeural", gender: "Female" },
-    { voice: "pa-IN-OjasNeural", gender: "Male" },
-  ],
   "pl-PL": [
     { voice: "pl-PL-ZofiaNeural", gender: "Female" },
     { voice: "pl-PL-MarekNeural", gender: "Male" },
@@ -496,7 +491,6 @@ const LANGUAGE_CONFIGS = {
   amharic: { label: "Amharic", voice: "am-ET-MekdesNeural", lang: "am-ET", prefix: (name) => `${name} alē...` },
   yoruba: { label: "Yoruba", voice: "yo-NG-AbebiNeural", lang: "yo-NG", prefix: (name) => `${name} sọ pé...` },
   zulu: { label: "Zulu", voice: "zu-ZA-ThandoNeural", lang: "zu-ZA", prefix: (name) => `U-${name} uthe...` },
-  punjabi: { label: "Punjabi", voice: "pa-IN-VaaniNeural", lang: "pa-IN", prefix: (name) => `${name}:` }
 };
 
 // In-memory per-guild settings. Settings reset when the bot process restarts.
