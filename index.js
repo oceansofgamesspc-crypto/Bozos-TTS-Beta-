@@ -851,7 +851,29 @@ function scheduleVoiceReconnect(guildId, delay = 1_000) {
     if (state.manualDisconnect || !state.lastVoiceChannelId) return;
 
     const guild = client.guilds.cache.get(guildId);
-    const voiceChannel = guild?.channels.cache.get(state.lastVoiceChannelId);
+    if (!guild) return;
+
+    // If Discord's actual voice state says the bot is no longer in a VC,
+    // this was a real disconnect/kick rather than a network-only hiccup.
+    // Do not resurrect the session after a moderator disconnected the bot.
+    const botId = client.user?.id;
+    const actualBotChannelId = botId
+      ? (guild.voiceStates.cache.get(botId)?.channelId || guild.members.me?.voice?.channelId || null)
+      : null;
+
+    if (!actualBotChannelId) {
+      destroyGuildState(guildId);
+      return;
+    }
+
+    // If Discord moved the bot, follow the actual voice state instead of a
+    // stale remembered channel id.
+    if (actualBotChannelId !== state.lastVoiceChannelId) {
+      state.lastVoiceChannelId = actualBotChannelId;
+      state.voiceChannelId = actualBotChannelId;
+    }
+
+    const voiceChannel = guild.channels.cache.get(actualBotChannelId);
     if (!voiceChannel?.isVoiceBased()) return;
 
     const humans = getHumanMembersInVoiceChannel(guild, voiceChannel.id);
@@ -1459,17 +1481,30 @@ client.once(
    VOICE COMMAND ACCESS
 ========================================================= */
 
+function getActualBotVoiceChannelId(interaction) {
+  const botId = client.user?.id;
+  if (!botId || !interaction.guild) return null;
+
+  // Discord's guild voice-state cache is the source of truth here.
+  // Do not fall back to our internal state/getVoiceConnection because those
+  // can briefly be stale after a moderator disconnects the bot from the UI.
+  return (
+    interaction.guild.voiceStates.cache.get(botId)?.channelId ||
+    interaction.guild.members.me?.voice?.channelId ||
+    null
+  );
+}
+
 function requireSameVoiceChannel(interaction) {
   const userChannelId = interaction.member?.voice?.channelId || null;
-  const botChannelId = getVoiceConnection(interaction.guildId)?.joinConfig?.channelId ||
-    guildStates.get(interaction.guildId)?.voiceChannelId || null;
+  const botChannelId = getActualBotVoiceChannelId(interaction);
 
   if (!userChannelId) {
     return "You need to be in a voice channel to use this command.";
   }
 
   if (!botChannelId) {
-    return "Bozos is not currently in a voice channel.";
+    return "Bozos is not currently in a voice channel. Use `/join` first.";
   }
 
   if (userChannelId !== botChannelId) {
@@ -1953,16 +1988,28 @@ client.on(
       }
       const percent = interaction.options.getInteger("percent", true);
       const settings = getGuildSettings(interaction.guildId);
+      const currentPercent = Math.round((settings.volume ?? 1) * 100);
+
+      if (currentPercent === percent) {
+        return replyWithV2(interaction, {
+          title: "Volume Already Set",
+          description: `Bozos playback volume is already set to **${percent}%**.`,
+          color: COLORS.WARNING,
+          ephemeral: true,
+        });
+      }
+
       settings.volume = percent / 100;
 
       const state = guildStates.get(interaction.guildId);
       if (state?.currentResource?.volume) {
+        // Apply the new gain immediately to speech that is already playing.
         state.currentResource.volume.setVolume(settings.volume);
       }
 
       return replyWithV2(interaction, {
         title: "🔊 Volume Updated",
-        description: `Bozos playback volume is now **${percent}%**.\n\nThis is the actual playback gain, independent of TTS generation loudness.`,
+        description: `Bozos playback volume is now **${percent}%**.\n\nThe change also applies immediately to any TTS that is currently playing.`,
         color: COLORS.SUCCESS,
       });
     }
@@ -2005,6 +2052,16 @@ client.on(
       }
       const enabled = interaction.options.getBoolean("enabled", true);
       const settings = getGuildSettings(interaction.guildId);
+
+      if (settings.announcements.enabled === enabled) {
+        return replyWithV2(interaction, {
+          title: enabled ? "Announcements Already Enabled" : "Announcements Already Disabled",
+          description: `Join and leave announcements are already **${enabled ? "enabled" : "disabled"}** for this server.`,
+          color: COLORS.WARNING,
+          ephemeral: true,
+        });
+      }
+
       settings.announcements.enabled = enabled;
 
       return replyWithV2(interaction, {
@@ -2279,13 +2336,14 @@ client.on(
       const state = guildStates.get(guildId);
 
       if (!newState.channelId) {
-        if (!state || state.manualDisconnect) {
-          destroyGuildState(guildId);
-          return;
-        }
-
-        state.connection = null;
-        scheduleVoiceReconnect(guildId);
+        // A real VOICE_STATE_UPDATE with channelId=null means Discord has
+        // removed this bot user from the VC (for example via the Discord UI).
+        // End the session immediately. Network-only/transient failures are
+        // still handled by VoiceConnectionStatus.Disconnected and reconnect.
+        console.log(
+          `[Voice] Bot left/disconnected from VC in guild ${guildId}. Ending TTS session immediately.`
+        );
+        destroyGuildState(guildId);
         return;
       }
 
