@@ -50,7 +50,6 @@ const EMPTY_CHANNEL_LEAVE_DELAY_MS = 30_000;
 const SPEAKER_REPEAT_WINDOW_MS = 8_000;
 const MAX_JOB_RETRIES = 3;
 const RETRY_DELAY_MS = 750;
-const SETTINGS_DIR = process.env.BOZOS_SETTINGS_DIR || path.join(process.cwd(), "data", "guild-settings");
 const MAX_VOLUME = 2.0;
 const JOIN_SOUND_FILE = path.join(process.cwd(), "bozos-tts-join.mp3");
 
@@ -227,6 +226,8 @@ const LANGUAGE_CONFIGS = {
   punjabi: { label: "Punjabi", voice: "pa-IN-VaaniNeural", lang: "pa-IN", prefix: (name) => `${name}:` }
 };
 
+// In-memory per-guild settings. Settings reset when the bot process restarts.
+// This intentionally avoids filesystem/database persistence so the repo stays self-contained.
 const guildSettingsCache = new Map();
 
 const DEFAULT_GUILD_SETTINGS = {
@@ -250,78 +251,11 @@ function cloneDefaultSettings() {
   return JSON.parse(JSON.stringify(DEFAULT_GUILD_SETTINGS));
 }
 
-function settingsPath(guildId) {
-  return path.join(SETTINGS_DIR, `${guildId}.json`);
-}
-
-function normalizeGuildSettings(input = {}) {
-  const settings = cloneDefaultSettings();
-  if (typeof input.serverLanguage === "string" && LANGUAGE_CONFIGS[input.serverLanguage]) {
-    settings.serverLanguage = input.serverLanguage;
-  }
-  if (typeof input.serverAccent === "string") {
-    settings.serverAccent = input.serverAccent.toLowerCase();
-  } else if (typeof input.accent === "string") {
-    // Migrate the previous server-wide accent setting.
-    settings.serverAccent = input.accent.toLowerCase();
-  }
-  if (Number.isFinite(input.volume)) {
-    settings.volume = Math.min(MAX_VOLUME, Math.max(0, Number(input.volume)));
-  }
-  if (typeof input.voicePreset === "string" && VOICE_PRESETS[input.voicePreset]) {
-    settings.voicePreset = input.voicePreset;
-  }
-  if (typeof input.accent === "string") settings.accent = input.accent.toLowerCase();
-  if (["smart", "always", "never"].includes(input.speakerMode)) {
-    settings.speakerMode = input.speakerMode;
-  }
-  if (Number.isFinite(input.speakerRepeatWindowMs)) {
-    settings.speakerRepeatWindowMs = Math.min(30_000, Math.max(0, Number(input.speakerRepeatWindowMs)));
-  }
-  if (input.announcements && typeof input.announcements === "object") {
-    if (typeof input.announcements.enabled === "boolean") {
-      settings.announcements.enabled = input.announcements.enabled;
-    } else {
-      // Migrate old join/leave settings: either enabled means the unified
-      // join+leave announcement feature is enabled.
-      settings.announcements.enabled = Boolean(
-        input.announcements.join || input.announcements.leave
-      );
-    }
-  }
-  if (input.userLanguages && typeof input.userLanguages === "object") {
-    for (const [userId, language] of Object.entries(input.userLanguages)) {
-      if (LANGUAGE_CONFIGS[language]) settings.userLanguages[userId] = language;
-    }
-  }
-  if (input.userAccents && typeof input.userAccents === "object") {
-    for (const [userId, accent] of Object.entries(input.userAccents)) {
-      if (typeof accent === "string") settings.userAccents[userId] = accent.toLowerCase();
-    }
-  }
-  return settings;
-}
-
 function getGuildSettings(guildId) {
-  if (guildSettingsCache.has(guildId)) return guildSettingsCache.get(guildId);
-
-  let settings = cloneDefaultSettings();
-  try {
-    const raw = fs.readFileSync(settingsPath(guildId), "utf8");
-    settings = normalizeGuildSettings(JSON.parse(raw));
-  } catch {
-    // First run or invalid settings: use defaults and persist a clean file.
+  if (!guildSettingsCache.has(guildId)) {
+    guildSettingsCache.set(guildId, cloneDefaultSettings());
   }
-  guildSettingsCache.set(guildId, settings);
-  return settings;
-}
-
-function saveGuildSettings(guildId) {
-  const settings = getGuildSettings(guildId);
-  fs.mkdirSync(SETTINGS_DIR, { recursive: true });
-  const tempPath = `${settingsPath(guildId)}.${process.pid}.tmp`;
-  fs.writeFileSync(tempPath, JSON.stringify(settings, null, 2), "utf8");
-  fs.renameSync(tempPath, settingsPath(guildId));
+  return guildSettingsCache.get(guildId);
 }
 
 function getGuildLanguageSelection(guildId, userId = null) {
@@ -1631,7 +1565,6 @@ client.on(
         settings.serverLanguage = selectedLanguage;
         settings.serverAccent = selectedAccent;
       }
-      saveGuildSettings(interaction.guildId);
 
       const selectedLabel = getLanguageVariantLabel(selectedLanguage, selectedAccent);
       await interaction.update({
@@ -1992,7 +1925,6 @@ client.on(
       const percent = interaction.options.getInteger("percent", true);
       const settings = getGuildSettings(interaction.guildId);
       settings.volume = percent / 100;
-      saveGuildSettings(interaction.guildId);
 
       return replyWithV2(interaction, {
         title: "🔊 Volume Updated",
@@ -2012,7 +1944,6 @@ client.on(
       const preset = interaction.options.getString("preset", true);
       const settings = getGuildSettings(interaction.guildId);
       settings.voicePreset = preset;
-      saveGuildSettings(interaction.guildId);
 
       return replyWithV2(interaction, {
         title: "🎙️ Voice Preset Updated",
@@ -2057,7 +1988,6 @@ client.on(
       const enabled = interaction.options.getBoolean("enabled", true);
       const settings = getGuildSettings(interaction.guildId);
       settings.announcements.enabled = enabled;
-      saveGuildSettings(interaction.guildId);
 
       return replyWithV2(interaction, {
         title: "📢 Voice Announcements Updated",
