@@ -26,15 +26,14 @@ import {
   entersState,
   getVoiceConnection,
   joinVoiceChannel,
+  StreamType,
 } from "@discordjs/voice";
 
-import { EdgeTTS } from "node-edge-tts";
-import { Readable } from "node:stream";
+import { MsEdgeTTS, OUTPUT_FORMAT } from "msedge-tts";
+import { PassThrough } from "node:stream";
 
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
-import crypto from "node:crypto";
 
 
 /* =========================================================
@@ -49,6 +48,8 @@ const SPEAKER_REPEAT_WINDOW_MS = 8_000;
 const MAX_JOB_RETRIES = 3;
 const RETRY_DELAY_MS = 750;
 const MAX_VOLUME = 2.0;
+const PREFETCH_BUFFER_BYTES = 2 * 1024 * 1024;
+const LATENCY_SAMPLE_LIMIT = 200;
 const JOIN_SOUND_FILE = path.join(process.cwd(), "bozos-tts-join.mp3");
 
 // Natural speech defaults stay fixed; /voice changes only the neural speaker model.
@@ -57,7 +58,7 @@ const TTS_VOICE_SETTINGS = {
   rate: "+4%",
   pitch: "+10Hz",
   volume: "+0%",
-  outputFormat: "audio-24khz-96kbitrate-mono-mp3",
+  outputFormat: OUTPUT_FORMAT.WEBM_24KHZ_16BIT_MONO_OPUS,
   saveSubtitles: false,
   timeout: 30_000,
 };
@@ -709,6 +710,423 @@ function getLanguageListString() {
     .join("\n");
 }
 
+
+/* =========================================================
+   GRAND HUMAN-LIKE PRONUNCIATION ENGINE
+   Built-in only: no user/server editing commands.
+========================================================= */
+
+const PRONUNCIATION_ENGINE_VERSION = "2026.08.24";
+
+function spellLetters(value) {
+  return String(value || "")
+    .replace(/[^A-Za-z]/g, "")
+    .toUpperCase()
+    .split("")
+    .join(" ");
+}
+
+// Research-backed or widely standardized pronunciations for terms that
+// generic TTS engines often read unnaturally. Ambiguous terms such as SQL/GIF
+// deliberately use conservative, unambiguous readings where possible.
+const GRAND_CANONICAL_PRONUNCIATIONS = [
+  { phrase: "PostgreSQL", spoken: "Post Gres Q L" },
+  { phrase: "Postgres", spoken: "Post Gres" },
+  { phrase: "MySQL", spoken: "My S Q L" },
+  { phrase: "SQLite", spoken: "S Q lite" },
+  { phrase: "NoSQL", spoken: "No S Q L" },
+  { phrase: "GraphQL", spoken: "Graph Q L" },
+  { phrase: "JSON", spoken: "Jason" },
+  { phrase: "YAML", spoken: "yam ul" },
+  { phrase: "NGINX", spoken: "engine X" },
+  { phrase: "nginx", spoken: "engine X", caseSensitive: true },
+  { phrase: "GNU/Linux", spoken: "guh new slash Linux" },
+  { phrase: "GNU", spoken: "guh new" },
+  { phrase: "Debian", spoken: "Deb ee en" },
+  { phrase: "Ubuntu", spoken: "oo boon too" },
+  { phrase: "Kubernetes", spoken: "koo ber net eez" },
+  { phrase: "kubectl", spoken: "kube control" },
+  { phrase: "K8s", spoken: "K eight S" },
+  { phrase: "Redis", spoken: "red iss" },
+  { phrase: "Linux", spoken: "lih nucks" },
+  { phrase: "cache", spoken: "cash", englishOnly: true },
+  { phrase: "daemon", spoken: "dee mon", englishOnly: true },
+  { phrase: "ASCII", spoken: "ass key" },
+  { phrase: "GUI", spoken: "gooey" },
+  { phrase: "BIOS", spoken: "bye oss" },
+  { phrase: "OAuth", spoken: "oh auth" },
+  { phrase: "WebAssembly", spoken: "Web Assembly" },
+  { phrase: "WASM", spoken: "waz em" },
+  { phrase: "REST", spoken: "rest", caseSensitive: true },
+  { phrase: "CRUD", spoken: "crud", caseSensitive: true },
+  { phrase: "SOAP", spoken: "soap", caseSensitive: true },
+  { phrase: "AJAX", spoken: "ay jacks", caseSensitive: true },
+  { phrase: "REPL", spoken: "rep ul", caseSensitive: true },
+  { phrase: "OLED", spoken: "oh led", caseSensitive: true },
+  { phrase: "QLED", spoken: "Q led", caseSensitive: true },
+  { phrase: "NVMe", spoken: "N V M E" },
+  { phrase: "PCIe", spoken: "P C I E" },
+  { phrase: "CI/CD", spoken: "C I C D", caseSensitive: true },
+  { phrase: "5G", spoken: "five G", caseSensitive: true },
+  { phrase: "4G", spoken: "four G", caseSensitive: true },
+  { phrase: "3G", spoken: "three G", caseSensitive: true },
+  { phrase: "CUDA", spoken: "koo duh" },
+  { phrase: "JPEG", spoken: "jay peg" },
+  { phrase: "JPG", spoken: "jay peg" },
+  { phrase: "MPEG", spoken: "em peg" },
+  { phrase: "FFmpeg", spoken: "F F em peg" },
+  { phrase: "ffmpeg", spoken: "F F em peg", caseSensitive: true },
+  { phrase: "Node.js", spoken: "Node J S" },
+  { phrase: "Next.js", spoken: "Next J S" },
+  { phrase: "Nuxt.js", spoken: "Nuxt J S" },
+  { phrase: "Vue.js", spoken: "View J S" },
+  { phrase: "React.js", spoken: "React J S" },
+  { phrase: "Three.js", spoken: "Three J S" },
+  { phrase: "Express.js", spoken: "Express J S" },
+  { phrase: "Discord.js", spoken: "Discord J S" },
+  { phrase: "OpenAI", spoken: "Open A I" },
+  { phrase: "ChatGPT", spoken: "Chat G P T" },
+  { phrase: "GitHub", spoken: "Git Hub" },
+  { phrase: "GitLab", spoken: "Git Lab" },
+  { phrase: "PyPI", spoken: "pie P I" },
+  { phrase: "NumPy", spoken: "num pie" },
+  { phrase: "SciPy", spoken: "sigh pie" },
+  { phrase: "PyTorch", spoken: "pie torch" },
+  { phrase: "C++", spoken: "C plus plus" },
+  { phrase: "C#", spoken: "C sharp" },
+  { phrase: "F#", spoken: "F sharp" },
+  { phrase: ".NET", spoken: "dot net" },
+  { phrase: "macOS", spoken: "Mac O S" },
+  { phrase: "iOS", spoken: "eye O S" },
+  { phrase: "iPadOS", spoken: "eye pad O S" },
+  { phrase: "watchOS", spoken: "watch O S" },
+  { phrase: "tvOS", spoken: "T V O S" },
+  { phrase: "Wi-Fi", spoken: "why fie" },
+  { phrase: "WiFi", spoken: "why fie" },
+  { phrase: "GTA V", spoken: "G T A five" },
+  { phrase: "GTA 5", spoken: "G T A five" },
+  { phrase: "RDR2", spoken: "R D R two" },
+  { phrase: "CS:GO", spoken: "C S go" },
+  { phrase: "CS2", spoken: "C S two" },
+  { phrase: "PUBG", spoken: "P U B G" },
+  { phrase: "LoL", spoken: "League of Legends", caseSensitive: true },
+  { phrase: "WoW", spoken: "World of Warcraft", caseSensitive: true },
+  { phrase: "PS5", spoken: "P S five" },
+  { phrase: "PS4", spoken: "P S four" },
+  { phrase: "2FA", spoken: "two factor authentication" },
+  { phrase: "MFA", spoken: "multi factor authentication" },
+  { phrase: "top.gg", spoken: "top dot G G" },
+  { phrase: "Top.gg", spoken: "top dot G G", caseSensitive: true },
+].sort((a, b) => b.phrase.length - a.phrase.length);
+
+// Common acronyms users often type in lowercase. These are intentionally
+// restricted to terms that are unlikely to be ordinary words.
+const COMMON_CASE_INSENSITIVE_INITIALISMS = new Set([
+  "tts", "stt", "asr", "vc", "dm", "dms", "afk", "ai", "api", "sdk",
+  "cpu", "gpu", "tpu", "vram", "fps", "url", "uri", "http", "https",
+  "html", "css", "js", "jsx", "ts", "tsx", "xml", "sql", "php", "npm",
+  "npx", "pnpm", "npc", "rpg", "arpg", "mmorpg", "mmo", "pvp", "pve",
+  "dps", "rng", "aoe", "hud", "mmr", "kda", "smp", "rts", "moba",
+  "ssh", "ssl", "tls", "vpn", "cdn", "dns", "dhcp", "tcp", "udp",
+  "jwt", "csrf", "xss", "llm", "vlm", "nlp", "nlu", "rag", "agi",
+  "rlhf", "sft", "pdf", "png", "svg", "csv", "faq", "fyi", "gg", "wp",
+  "yt", "ttv", "nsfw", "sfw", "otp", "uuid", "uid", "db", "qa",
+]);
+
+const CHAT_EXPANSION_RULES = [
+  { phrase: "brb", spoken: "be right back" },
+  { phrase: "btw", spoken: "by the way" },
+  { phrase: "idk", spoken: "I don't know" },
+  { phrase: "imo", spoken: "in my opinion" },
+  { phrase: "imho", spoken: "in my humble opinion" },
+  { phrase: "irl", spoken: "in real life" },
+  { phrase: "tbh", spoken: "to be honest" },
+  { phrase: "ngl", spoken: "not gonna lie" },
+  { phrase: "omw", spoken: "on my way" },
+  { phrase: "ikr", spoken: "I know, right" },
+  { phrase: "afaik", spoken: "as far as I know" },
+  { phrase: "iirc", spoken: "if I remember correctly" },
+  { phrase: "fwiw", spoken: "for what it's worth" },
+  { phrase: "tldr", spoken: "too long, didn't read" },
+  { phrase: "nvm", spoken: "never mind" },
+  { phrase: "lmk", spoken: "let me know" },
+  { phrase: "hmu", spoken: "hit me up" },
+  { phrase: "ttyl", spoken: "talk to you later" },
+  { phrase: "gtg", spoken: "got to go" },
+  { phrase: "g2g", spoken: "got to go" },
+  { phrase: "glhf", spoken: "good luck, have fun" },
+  { phrase: "ggwp", spoken: "good game, well played" },
+  { phrase: "tysm", spoken: "thank you so much" },
+  { phrase: "wdym", spoken: "what do you mean" },
+  { phrase: "wym", spoken: "what do you mean" },
+  { phrase: "idc", spoken: "I don't care" },
+  { phrase: "wbu", spoken: "what about you" },
+  { phrase: "hbu", spoken: "how about you" },
+  { phrase: "wyd", spoken: "what are you doing" },
+  { phrase: "wya", spoken: "where are you" },
+  { phrase: "icymi", spoken: "in case you missed it" },
+  { phrase: "asap", spoken: "as soon as possible" },
+  { phrase: "smh", spoken: "shaking my head" },
+  { phrase: "omg", spoken: "oh my God" },
+  { phrase: "lmao", spoken: "L M A O" },
+  { phrase: "rofl", spoken: "R O F L" },
+  { phrase: "wtf", spoken: "W T F" },
+  { phrase: "stfu", spoken: "S T F U" },
+].map((entry) => ({ ...entry, caseSensitive: false }))
+  .sort((a, b) => b.phrase.length - a.phrase.length);
+
+// Short chat forms are case-sensitive to avoid corrupting real names/words:
+// e.g. "Ty" can be a person's name while lowercase "ty" commonly means thank you.
+const EXACT_CHAT_RULES = [
+  { phrase: "rn", spoken: "right now" },
+  { phrase: "ty", spoken: "thank you" },
+  { phrase: "yw", spoken: "you're welcome" },
+  { phrase: "np", spoken: "no problem" },
+  { phrase: "pls", spoken: "please" },
+  { phrase: "plz", spoken: "please" },
+  { phrase: "sry", spoken: "sorry" },
+  { phrase: "msg", spoken: "message" },
+  { phrase: "ppl", spoken: "people" },
+  { phrase: "tmr", spoken: "tomorrow" },
+  { phrase: "tmrw", spoken: "tomorrow" },
+  { phrase: "bday", spoken: "birthday" },
+  { phrase: "bc", spoken: "because" },
+  { phrase: "bcz", spoken: "because" },
+  { phrase: "cuz", spoken: "because" },
+  { phrase: "coz", spoken: "because" },
+  { phrase: "abt", spoken: "about" },
+  { phrase: "ur", spoken: "your" },
+  { phrase: "u", spoken: "you" },
+  { phrase: "r", spoken: "are" },
+  { phrase: "atm", spoken: "at the moment" },
+  { phrase: "mb", spoken: "my bad" },
+  { phrase: "ez", spoken: "easy" },
+  { phrase: "im", spoken: "I'm" },
+  { phrase: "ive", spoken: "I've" },
+  { phrase: "ill", spoken: "I'll" },
+  { phrase: "dont", spoken: "don't" },
+  { phrase: "cant", spoken: "can't" },
+  { phrase: "wont", spoken: "won't" },
+  { phrase: "didnt", spoken: "didn't" },
+  { phrase: "doesnt", spoken: "doesn't" },
+  { phrase: "isnt", spoken: "isn't" },
+  { phrase: "arent", spoken: "aren't" },
+  { phrase: "wasnt", spoken: "wasn't" },
+  { phrase: "werent", spoken: "weren't" },
+  { phrase: "shouldnt", spoken: "shouldn't" },
+  { phrase: "wouldnt", spoken: "wouldn't" },
+  { phrase: "couldnt", spoken: "couldn't" },
+  { phrase: "havent", spoken: "haven't" },
+  { phrase: "hasnt", spoken: "hasn't" },
+  { phrase: "hadnt", spoken: "hadn't" },
+  { phrase: "youre", spoken: "you're" },
+  { phrase: "theyre", spoken: "they're" },
+  { phrase: "weve", spoken: "we've" },
+  { phrase: "youve", spoken: "you've" },
+  { phrase: "thats", spoken: "that's" },
+  { phrase: "whats", spoken: "what's" },
+  { phrase: "lets", spoken: "let's" },
+].map((entry) => ({ ...entry, caseSensitive: true }))
+  .sort((a, b) => b.phrase.length - a.phrase.length);
+
+const FILE_EXTENSION_SPEECH = new Map([
+  ["js", "J S"], ["jsx", "J S X"], ["ts", "T S"], ["tsx", "T S X"],
+  ["json", "Jason"], ["yaml", "yam ul"], ["yml", "Y M L"], ["xml", "X M L"],
+  ["html", "H T M L"], ["css", "C S S"], ["env", "E N V"], ["exe", "E X E"],
+  ["pdf", "P D F"], ["png", "P N G"], ["jpg", "jay peg"], ["jpeg", "jay peg"],
+  ["gif", "gif"], ["svg", "S V G"], ["csv", "C S V"], ["txt", "T X T"],
+  ["md", "M D"], ["zip", "zip"], ["rar", "R A R"], ["7z", "seven zip"],
+  ["mp3", "M P three"], ["mp4", "M P four"], ["wav", "wave"], ["flac", "flack"],
+  ["webm", "web em"], ["mkv", "M K V"], ["avi", "A V I"], ["mov", "M O V"],
+]);
+
+const COMMON_CASE_SENSITIVE_INITIALISMS = new Set([
+  // Ambiguous as lowercase words, so only spell them when the author wrote caps.
+  "OS", "PC", "UI", "UX", "IP", "ID", "ML", "VR", "AR", "IT", "TV", "DJ",
+  "SSD", "HDD", "USB", "HDMI", "PSU", "DDR", "RGB", "LED", "LCD", "NFC", "GPS",
+  "LTE", "SIM", "QR", "SMS", "MMS", "VPS", "VM", "AWS", "GCP", "OCI", "S3",
+  "EC2", "CI", "CD", "QA", "SRE", "DBA", "CEO", "CTO", "CFO", "COO", "HR",
+  "USA", "UK", "UAE", "EU", "UN", "WHO", "FBI", "CIA", "BBC", "CNN",
+  "JEE", "CBSE", "ICSE", "IIT", "NIT", "GPA", "CGPA", "SAT", "FAQ",
+  "EDM", "BPM", "KDR", "KD", "HP", "XP", "TPS", "RTS", "SMP",
+]);
+
+function escapeRegex(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function replaceLiteralPhrase(text, phrase, replacement, caseSensitive = false) {
+  if (!phrase) return text;
+  const escaped = escapeRegex(phrase);
+  const startsWord = /^[\p{L}\p{N}_]/u.test(phrase);
+  const endsWord = /[\p{L}\p{N}_]$/u.test(phrase);
+  const pattern = `${startsWord ? "(?<![\\p{L}\\p{N}_])" : ""}${escaped}${endsWord ? "(?![\\p{L}\\p{N}_])" : ""}`;
+  return text.replace(new RegExp(pattern, caseSensitive ? "gu" : "giu"), replacement);
+}
+
+function applyRuleList(text, rules, languageKey = "english") {
+  let output = text;
+  for (const rule of rules) {
+    if (rule.englishOnly && languageKey !== "english") continue;
+    output = replaceLiteralPhrase(output, rule.phrase, rule.spoken, Boolean(rule.caseSensitive));
+  }
+  return output;
+}
+
+function pluralizeUnit(value, singular, plural = `${singular}s`) {
+  return Number(value) === 1 ? singular : plural;
+}
+
+function applyContextualPronunciations(text) {
+  let output = text;
+
+  // Version strings: v3.1.2 -> version 3 point 1 point 2.
+  output = output.replace(/\bv(\d+(?:\.\d+){1,4})\b/gi, (_, version) =>
+    `version ${version.split(".").join(" point ")}`
+  );
+
+  // IP addresses: read dotted quads as groups instead of one giant decimal.
+  output = output.replace(/\b(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})\b/g,
+    (_, a, b, c, d) => `${a} dot ${b} dot ${c} dot ${d}`
+  );
+
+  // Extremely long Discord/user/service IDs are clearer digit-by-digit.
+  output = output.replace(/\b\d{15,22}\b/g, (digits) => digits.split("").join(" "));
+
+  // Storage sizes and memory capacities.
+  output = output.replace(/\b(\d+(?:\.\d+)?)\s*(KB|MB|GB|TB)\b/g, (_, value, unit) => {
+    const names = {
+      KB: ["kilobyte", "kilobytes"], MB: ["megabyte", "megabytes"],
+      GB: ["gigabyte", "gigabytes"], TB: ["terabyte", "terabytes"],
+    };
+    const [singular, plural] = names[unit];
+    return `${value} ${pluralizeUnit(value, singular, plural)}`;
+  });
+  output = output.replace(/\b(\d+(?:\.\d+)?)\s*(KiB|MiB|GiB|TiB)\b/g, (_, value, unit) => {
+    const names = {
+      KiB: ["kibibyte", "kibibytes"], MiB: ["mebibyte", "mebibytes"],
+      GiB: ["gibibyte", "gibibytes"], TiB: ["tebibyte", "tebibytes"],
+    };
+    const [singular, plural] = names[unit];
+    return `${value} ${pluralizeUnit(value, singular, plural)}`;
+  });
+
+  // Network rates and clock frequencies.
+  output = output.replace(/\b(\d+(?:\.\d+)?)\s*(Kbps|Mbps|Gbps|Tbps)\b/g, (_, value, unit) => {
+    const names = { Kbps: "kilobits", Mbps: "megabits", Gbps: "gigabits", Tbps: "terabits" };
+    return `${value} ${names[unit]} per second`;
+  });
+  output = output.replace(/\b(\d+(?:\.\d+)?)\s*(kHz|MHz|GHz)\b/g, (_, value, unit) => {
+    const names = { kHz: "kilohertz", MHz: "megahertz", GHz: "gigahertz" };
+    return `${value} ${names[unit]}`;
+  });
+  output = output.replace(/\b(\d+(?:\.\d+)?)\s*FPS\b/g, "$1 F P S");
+  output = output.replace(/\b(\d+)p\b/g, "$1 P");
+
+  // Common hardware/model forms.
+  output = output.replace(/\b(RTX|GTX|DDR|USB|HDMI)(\d{1,5})\b/g, (_, prefix, number) =>
+    `${spellLetters(prefix)} ${number}`
+  );
+  output = output.replace(/\bGPT[- ]?(\d+(?:\.\d+)?)\b/gi, (_, number) => `G P T ${number}`);
+  output = output.replace(/\bV(\d+(?:\.\d+)?)\b/g, (_, number) => `V ${number}`);
+  output = output.replace(/\bIPv([46])\b/g, (_, version) => `I P V ${version}`);
+
+  // Filename extensions after proper-name rules have already run.
+  output = output.replace(/\.([A-Za-z0-9]{1,5})\b/g, (whole, ext) => {
+    const spoken = FILE_EXTENSION_SPEECH.get(ext.toLowerCase());
+    return spoken ? ` dot ${spoken}` : whole;
+  });
+
+  return output;
+}
+
+function applyCommonInitialisms(text) {
+  let output = text;
+
+  for (const token of COMMON_CASE_INSENSITIVE_INITIALISMS) {
+    const spoken = token === "yt" ? "YouTube" : spellLetters(token);
+    output = replaceLiteralPhrase(output, token, spoken, false);
+  }
+
+  for (const token of COMMON_CASE_SENSITIVE_INITIALISMS) {
+    output = replaceLiteralPhrase(output, token, spellLetters(token), true);
+  }
+
+  // Plural forms of known initialisms: APIs -> A P I's, GPUs -> G P U's.
+  const known = new Set([
+    ...[...COMMON_CASE_INSENSITIVE_INITIALISMS].map((item) => item.toUpperCase()),
+    ...COMMON_CASE_SENSITIVE_INITIALISMS,
+  ]);
+  output = output.replace(/\b([A-Z]{2,6})s\b/g, (whole, acronym) =>
+    known.has(acronym) ? `${spellLetters(acronym)}'s` : whole
+  );
+
+  return output;
+}
+
+function normalizeExpressiveSpelling(text) {
+  return String(text || "")
+    // "brooooo" -> "broo"; keep some emphasis without making TTS drone.
+    .replace(/([A-Za-z])\1{2,}/g, "$1$1")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function applyGrandPronunciation(text, { languageKey = "english", mode = "speech" } = {}) {
+  let output = normalizeExpressiveSpelling(text);
+
+  // Protect real dotted product/runtime names such as Node.js and .NET before
+  // the generic filename-extension reader handles package.json/index.js.
+  const dottedCanonicalRules = GRAND_CANONICAL_PRONUNCIATIONS.filter((rule) => rule.phrase.includes("."));
+  output = applyRuleList(output, dottedCanonicalRules, languageKey);
+  output = applyContextualPronunciations(output);
+  output = applyRuleList(output, GRAND_CANONICAL_PRONUNCIATIONS, languageKey);
+
+  if (mode === "speech") {
+    output = applyRuleList(output, CHAT_EXPANSION_RULES, languageKey);
+    if (languageKey === "english") {
+      output = applyRuleList(output, EXACT_CHAT_RULES, languageKey);
+    }
+  }
+
+  output = applyCommonInitialisms(output);
+  return output.replace(/\s+/g, " ").trim();
+}
+
+function decodeEmbeddedLeetspeak(token) {
+  if (!/[A-Za-z]/.test(token) || !/\d/.test(token)) return token;
+  const substitutions = { "0": "o", "3": "e", "4": "a", "5": "s", "7": "t" };
+  return token.replace(/(?<=[A-Za-z])[03457](?=[A-Za-z])/g, (digit) => substitutions[digit] || digit);
+}
+
+function humanizeDisplayName(name) {
+  let output = String(name || "someone").trim();
+
+  // Remove common decorative xX...Xx wrappers without touching normal names.
+  const hadDecorativeXPrefix = /^[_.\-~|]*[xX]{2}(?=[A-Za-z0-9])/.test(output);
+  output = output.replace(/^[_.\-~|]*[xX]{2}(?=[A-Za-z0-9])/, "");
+  if (hadDecorativeXPrefix) {
+    output = output.replace(/[_.\-~|]*[xX]{2}[_.\-~|]*$/, "");
+  } else {
+    output = output.replace(/[_.\-~|]+[xX]{2}[_.\-~|]*$/, "");
+  }
+  output = output
+    .replace(/[_.\-]+/g, " ")
+    .replace(/([a-z\d])([A-Z])/g, "$1 $2")
+    .replace(/\b[A-Za-z]*\d[A-Za-z]+\b/g, (token) => decodeEmbeddedLeetspeak(token))
+    .replace(/([A-Za-z])(\d+)/g, "$1 $2")
+    .replace(/(\d+)([A-Za-z])/g, "$1 $2")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  return applyGrandPronunciation(output, { mode: "name" });
+}
+
+function applyHumanPronunciation(text, guildId = null, userId = null) {
+  const languageKey = guildId ? getGuildLanguage(guildId, userId) : "english";
+  return applyGrandPronunciation(text, { languageKey, mode: "speech" });
+}
+
 const HELP_CATEGORIES = {
   home: {
     emoji: "🏠",
@@ -732,6 +1150,7 @@ const HELP_CATEGORIES = {
       "`/volume` — Set playback volume from 0–200%.\n" +
       "" +
       "`/skip` — Skip the current TTS message.\n\n" +
+      "🗣️ **Grand Pronunciation Engine** — Automatically humanizes chat slang, acronyms, tech/gaming terms, file formats, units, and Discord-style usernames.\n\n" +
       "**Choose a category in the select menu to show commands.**",
   },
 
@@ -818,9 +1237,10 @@ function buildHelpV2Payload(categoryKey = "home") {
 function buildSpeechText(speakerName, cleanedMessage, guildId, userId = null, includeSpeakerName = true) {
   if (!includeSpeakerName) return cleanedMessage;
 
+  const spokenName = humanizeDisplayName(speakerName, guildId, userId);
   // A colon gives the TTS engine a natural pause without forcing the repetitive
   // "John said..." construction on every message.
-  return `${speakerName}: ${cleanedMessage}`;
+  return `${spokenName}: ${cleanedMessage}`;
 }
 
 function shouldAnnounceSpeaker(state, guild, member, now = performance.now()) {
@@ -854,6 +1274,8 @@ if (!DISCORD_TOKEN) {
 /* =========================================================
    DISCORD CLIENT
 ========================================================= */
+
+let isShuttingDown = false;
 
 const client = new Client({
   intents: [
@@ -1040,6 +1462,7 @@ function createGuildState(guildId) {
     manualDisconnect: false,
     lastQueuedSpeakerId: null,
     lastQueuedSpeakerAt: 0,
+    prefetchedJobId: null,
   };
 
   player.on("error", (error) => {
@@ -1074,50 +1497,199 @@ function clearEmptyChannelTimer(state) {
 
 
 /* =========================================================
-   EDGE TTS
+   EDGE TTS — TRUE STREAMING ENGINE
 ========================================================= */
 
-async function generateTtsFile(text, guildId, userId = null) {
+const playbackLatencySamples = [];
+
+function recordPlaybackLatency(ms) {
+  if (!Number.isFinite(ms)) return;
+  playbackLatencySamples.push(ms);
+  if (playbackLatencySamples.length > LATENCY_SAMPLE_LIMIT) playbackLatencySamples.shift();
+
+  const sorted = [...playbackLatencySamples].sort((a, b) => a - b);
+  const percentile = (p) => sorted[Math.min(sorted.length - 1, Math.max(0, Math.ceil(sorted.length * p) - 1))] ?? 0;
+  client.bozoMetrics = {
+    samples: sorted.length,
+    playbackLatencyP50Ms: Math.round(percentile(0.50)),
+    playbackLatencyP95Ms: Math.round(percentile(0.95)),
+    playbackLatencyLastMs: Math.round(ms),
+  };
+}
+
+function escapeSsmlText(text) {
+  return String(text || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/\"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
+
+async function createStreamingTts(text, guildId, userId = null, messageReceivedAt = performance.now()) {
   const cleanText = String(text || "").trim();
   if (!cleanText) throw new Error("TTS text cannot be empty.");
 
-  const languageKey = getGuildLanguage(guildId, userId);
   const languageConfig = getGuildLanguageConfig(guildId, userId);
-  const voiceSettings = getEffectiveVoiceSettings(guildId, userId);
   const voice = getEffectiveVoice(guildId, userId);
-  const { accent, volumeMultiplier, ...ttsSettings } = voiceSettings;
-
-  const voiceLocale = voice.split("-").slice(0, 2).join("-");
-  const edgeTts = new EdgeTTS({
-    voice,
-    lang: voiceLocale || languageConfig.lang,
-    ...ttsSettings,
-  });
-
-  const outputPath = path.join(
-    os.tmpdir(),
-    `bozos-tts-${crypto.randomUUID()}.mp3`
-  );
-
-  const startedAt = performance.now();
-  await edgeTts.ttsPromise(cleanText, outputPath);
+  const edgeTts = new MsEdgeTTS();
+  const synthesisStartedAt = performance.now();
 
   try {
-    const stats = await fs.promises.stat(outputPath);
-    if (!stats.isFile() || stats.size === 0) {
-      throw new Error("Edge TTS generated an empty audio file.");
-    }
-
-    const elapsed = Math.round(performance.now() - startedAt);
-
-    console.log(
-      `[TTS] Generated ${languageConfig.label} / ${voice} audio in ${elapsed} ms.`
+    await edgeTts.setMetadata(voice, TTS_VOICE_SETTINGS.outputFormat);
+    const metadataReadyAt = performance.now();
+    const result = await Promise.resolve(
+      edgeTts.toStream(escapeSsmlText(cleanText), {
+        rate: TTS_VOICE_SETTINGS.rate,
+        pitch: TTS_VOICE_SETTINGS.pitch,
+        volume: TTS_VOICE_SETTINGS.volume,
+      })
     );
 
-    return outputPath;
+    const sourceStream = result?.audioStream;
+    if (!sourceStream?.pipe) throw new Error("Edge TTS did not return a readable audio stream.");
+
+    // A bounded PassThrough lets the next queued message begin synthesising while
+    // the current one is still speaking, without buffering an unlimited file in RAM.
+    const audioStream = new PassThrough({ highWaterMark: PREFETCH_BUFFER_BYTES });
+    const telemetry = {
+      synthesisStartedAt,
+      metadataReadyAt,
+      firstChunkAt: null,
+      messageReceivedAt,
+      voice,
+      languageLabel: languageConfig.label,
+    };
+
+    sourceStream.once("data", () => {
+      telemetry.firstChunkAt = performance.now();
+      console.log(
+        `[Latency] Edge first audio chunk: ${Math.round(telemetry.firstChunkAt - messageReceivedAt)} ms ` +
+        `(${languageConfig.label} / ${voice})`
+      );
+    });
+
+    sourceStream.once("error", (error) => {
+      audioStream.destroy(error);
+      try { edgeTts.close(); } catch {}
+    });
+    sourceStream.once("end", () => {
+      try { edgeTts.close(); } catch {}
+    });
+
+    sourceStream.pipe(audioStream);
+    return { audioStream, sourceStream, edgeTts, telemetry };
   } catch (error) {
-    await fs.promises.unlink(outputPath).catch(() => {});
+    try { edgeTts.close(); } catch {}
     throw error;
+  }
+}
+
+function cleanupPreparedAudio(prepared) {
+  if (!prepared) return;
+  try { prepared.sourceStream?.destroy?.(); } catch {}
+  try { prepared.audioStream?.destroy?.(); } catch {}
+  try { prepared.edgeTts?.close?.(); } catch {}
+}
+
+function prepareJobAudio(job, guildId) {
+  if (!job.preparedAudioPromise) {
+    job.preparedAudioPromise = createStreamingTts(
+      job.speechText,
+      guildId,
+      job.isAnnouncement ? null : job.userId,
+      job.messageReceivedAt
+    ).catch((error) => {
+      job.preparedAudioPromise = null;
+      throw error;
+    });
+  }
+  return job.preparedAudioPromise;
+}
+
+function prefetchNextQueuedJob(guildId, state) {
+  if (!state || state.player.state.status !== AudioPlayerStatus.Playing) return;
+  const nextJob = state.queue[0];
+  if (!nextJob || nextJob.preparedAudioPromise) return;
+  if (state.prefetchedJobId === nextJob.jobId) return;
+
+  state.prefetchedJobId = nextJob.jobId;
+  console.log(`[TTS] Pre-generating next queued message in guild ${guildId}.`);
+  void prepareJobAudio(nextJob, guildId)
+    .catch((error) => console.warn(`[TTS] Pre-generation failed in guild ${guildId}; normal retry will handle it:`, error?.message || error))
+    .finally(() => {
+      if (state.prefetchedJobId === nextJob.jobId) state.prefetchedJobId = null;
+    });
+}
+
+/* =========================================================
+   TOP.GG STATS
+========================================================= */
+
+async function updateTopGGStats() {
+  try {
+    if (!process.env.TOPGG_TOKEN) {
+      console.warn("[Top.gg] TOPGG_TOKEN is missing.");
+      return;
+    }
+
+    // Only shard 0 should post stats
+    if (client.shard && !client.shard.ids.includes(0)) {
+      return;
+    }
+
+    let serverCount;
+    let shardCount;
+
+    if (client.shard) {
+      // Get guild counts from ALL shards
+      const guildCounts = await client.shard.fetchClientValues(
+        "guilds.cache.size"
+      );
+
+      serverCount = guildCounts.reduce(
+        (total, count) => total + count,
+        0
+      );
+
+      shardCount = guildCounts.length;
+    } else {
+      // Fallback if running without sharding
+      serverCount = client.guilds.cache.size;
+      shardCount = 1;
+    }
+
+    const response = await fetch(
+      "https://top.gg/api/v1/projects/@me/metrics",
+      {
+        method: "PATCH",
+        headers: {
+          Authorization: `Bearer ${process.env.TOPGG_TOKEN}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          server_count: serverCount,
+          shard_count: shardCount,
+        }),
+      }
+    );
+
+    if (!response.ok) {
+      const error = await response.text();
+
+      console.error(
+        `[Top.gg] Failed to update stats: ${response.status}`,
+        error
+      );
+
+      return;
+    }
+
+    console.log(
+      `[Top.gg] Updated stats | Servers: ${serverCount} | Shards: ${shardCount}`
+    );
+  } catch (error) {
+    console.error("[Top.gg] Stats update error:", error);
   }
 }
 
@@ -1226,6 +1798,14 @@ function destroyGuildState(guildId) {
   if (state) {
     clearEmptyChannelTimer(state);
 
+    for (const queuedJob of state.queue) {
+      if (queuedJob.preparedAudioPromise) {
+        void queuedJob.preparedAudioPromise.then(cleanupPreparedAudio).catch(() => {});
+      }
+    }
+    if (state.currentJob?.preparedAudioPromise) {
+      void state.currentJob.preparedAudioPromise.then(cleanupPreparedAudio).catch(() => {});
+    }
     state.queue.length = 0;
     state.currentJob = null;
     state.processing = false;
@@ -1370,7 +1950,7 @@ function updateEmptyChannelTimer(guildId) {
    PLAYBACK
 ========================================================= */
 
-function waitForPlaybackToFinish(player) {
+function waitForPlaybackToFinish(player, { onPlaying: onPlaybackStarted, shouldResolveEarly } = {}) {
   return new Promise((resolve, reject) => {
     let startedPlaying = false;
 
@@ -1402,11 +1982,18 @@ function waitForPlaybackToFinish(player) {
     }
 
     function onPlaying() {
-      startedPlaying = true;
+      if (!startedPlaying) {
+        startedPlaying = true;
+        try { onPlaybackStarted?.(); } catch {}
+      }
     }
 
     function onIdle() {
       if (!startedPlaying) {
+        if (shouldResolveEarly?.()) {
+          cleanup();
+          resolve();
+        }
         return;
       }
 
@@ -1479,18 +2066,18 @@ async function playJoinSound(guildId, state) {
 ========================================================= */
 
 /* =========================================================
-   MESSAGE QUEUE (Upgraded for RAM Streaming)
+   MESSAGE QUEUE (True Streaming + One-Message Prefetch)
 ========================================================= */
 
 async function processGuildQueue(guildId, state) {
-  if (state.processing) return;
+  if (state.processing || isShuttingDown) return;
   state.processing = true;
 
   try {
-    while (state.queue.length > 0) {
+    while (state.queue.length > 0 && !isShuttingDown) {
       const job = state.queue.shift();
       state.currentJob = job;
-      let audioPath = null;
+      let prepared = null;
 
       try {
         if (!state.voiceChannelId || state.voiceChannelId !== job.voiceChannelId) continue;
@@ -1500,61 +2087,83 @@ async function processGuildQueue(guildId, state) {
         if (!voiceChannel?.isVoiceBased()) throw new Error("The tracked voice channel no longer exists.");
 
         await connectToVoiceChannel(voiceChannel, state);
+        prepared = await prepareJobAudio(job, guildId);
 
-        audioPath = await generateTtsFile(job.speechText, guildId, job.isAnnouncement ? null : job.userId);
-
-        if (state.skipRequested) {
-          await fs.promises.unlink(audioPath).catch(() => {});
-          audioPath = null;
+        if (state.skipRequested || isShuttingDown) {
           state.skipRequested = false;
+          cleanupPreparedAudio(prepared);
+          prepared = null;
           continue;
         }
 
-        const audioBuffer = await fs.promises.readFile(audioPath);
-        await fs.promises.unlink(audioPath).catch(() => {});
-        audioPath = null;
-
         const settings = getGuildSettings(guildId);
-        const audioStream = Readable.from(audioBuffer);
-        const resource = createAudioResource(audioStream, {
+        const resource = createAudioResource(prepared.audioStream, {
+          inputType: StreamType.WebmOpus,
           inlineVolume: true,
-          silencePaddingFrames: 2,
+          silencePaddingFrames: 1,
         });
         resource.volume?.setVolume(settings.volume);
         state.currentResource = resource;
 
-        console.log(
-          `[Latency] Message-to-playback: ${Math.round(performance.now() - job.messageReceivedAt)} ms`
-        );
-
         state.skipRequested = false;
+        const playCalledAt = performance.now();
+        const playbackFinished = waitForPlaybackToFinish(state.player, {
+          shouldResolveEarly: () => state.skipRequested || isShuttingDown,
+          onPlaying: () => {
+            const audibleAt = performance.now();
+            const totalMs = audibleAt - job.messageReceivedAt;
+            const playerStartupMs = audibleAt - playCalledAt;
+            const firstChunkMs = prepared?.telemetry?.firstChunkAt
+              ? prepared.telemetry.firstChunkAt - job.messageReceivedAt
+              : null;
+
+            recordPlaybackLatency(totalMs);
+            console.log(
+              `[Latency] REAL message-to-audio: ${Math.round(totalMs)} ms | ` +
+              `player startup: ${Math.round(playerStartupMs)} ms` +
+              (firstChunkMs == null ? "" : ` | Edge first chunk: ${Math.round(firstChunkMs)} ms`) +
+              ` | p50: ${client.bozoMetrics?.playbackLatencyP50Ms ?? "-"} ms | ` +
+              `p95: ${client.bozoMetrics?.playbackLatencyP95Ms ?? "-"} ms`
+            );
+
+            // A message may have arrived after player.play(), so check again now.
+            prefetchNextQueuedJob(guildId, state);
+          },
+        });
+
+        // Attach playback listeners before player.play() so a fully-prefetched
+        // resource cannot enter Playing before the real-latency listener exists.
         state.player.play(resource);
-        await waitForPlaybackToFinish(state.player);
+
+        // Start synthesising exactly one message ahead while this one is audible.
+        prefetchNextQueuedJob(guildId, state);
+        await playbackFinished;
 
         if (state.skipRequested) state.skipRequested = false;
-        state.currentResource = null;
       } catch (error) {
         const attempts = (job.attempts || 0) + 1;
         job.attempts = attempts;
 
         console.error(`[TTS] Queue item failed in guild ${guildId} (attempt ${attempts}/${MAX_JOB_RETRIES}):`, error);
+        cleanupPreparedAudio(prepared);
+        prepared = null;
+        job.preparedAudioPromise = null;
 
-        // Keep the job for transient provider/voice failures. Messages from users
-        // who already left the VC are still discarded on the next pass.
-        if (attempts < MAX_JOB_RETRIES && state.voiceChannelId === job.voiceChannelId) {
+        if (attempts < MAX_JOB_RETRIES && state.voiceChannelId === job.voiceChannelId && !isShuttingDown) {
           state.queue.unshift(job);
           await wait(RETRY_DELAY_MS * attempts);
           if (!state.connection) scheduleVoiceReconnect(guildId);
         }
       } finally {
-        if (audioPath) await fs.promises.unlink(audioPath).catch(() => {});
+        cleanupPreparedAudio(prepared);
+        job.preparedAudioPromise = null;
         state.currentResource = null;
         state.currentJob = null;
       }
     }
   } finally {
     state.processing = false;
-    updateEmptyChannelTimer(guildId);
+    if (!isShuttingDown) updateEmptyChannelTimer(guildId);
   }
 }
 
@@ -1727,6 +2336,7 @@ function prepareMessageForSpeech(message, userId = null) {
   const languageConfig = getGuildLanguageConfig(message.guildId, userId);
   text = normalizeNumbersDatesAndTimes(text, languageConfig.lang || "en-US");
   text = normalizePunctuation(text);
+  text = applyHumanPronunciation(text, message.guildId, userId);
 
   const attachmentText = describeAttachments(message);
   text = `${text}${attachmentText}`.trim();
@@ -1753,6 +2363,7 @@ client.once(
   Events.ClientReady,
   async (readyClient) => {
     console.log(`Logged in as ${readyClient.user.tag}`);
+    console.log(`[Pronunciation] Grand pronunciation engine ${PRONUNCIATION_ENGINE_VERSION} loaded.`);
 
     readyClient.user.setPresence({
       activities: [
@@ -2090,6 +2701,15 @@ client.on(
           ephemeral: true,
         }
       );
+    }
+
+    if (isShuttingDown) {
+      return replyWithV2(interaction, {
+        title: "Bozos TTS Is Restarting",
+        description: "A graceful redeploy is in progress. Try the command again in a few seconds.",
+        color: COLORS.WARNING,
+        ephemeral: true,
+      });
     }
 
 
@@ -2684,7 +3304,8 @@ client.on(
       !message.inGuild() ||
       message.author.bot ||
       message.system ||
-      message.webhookId
+      message.webhookId ||
+      isShuttingDown
     ) {
       return;
     }
@@ -2757,6 +3378,8 @@ client.on(
     state.lastQueuedSpeakerAt = queuedAt;
 
     state.queue.push({
+      jobId: message.id,
+      messageId: message.id,
       guild: message.guild,
       member,
       userId: message.author.id,
@@ -2764,7 +3387,12 @@ client.on(
       speechText,
       messageReceivedAt: queuedAt,
       attempts: 0,
+      preparedAudioPromise: null,
     });
+
+    if (state.player.state.status === AudioPlayerStatus.Playing) {
+      prefetchNextQueuedJob(message.guildId, state);
+    }
 
     console.log(
       `[TTS] Queued message from ${speakerName}${includeSpeakerName ? " (speaker announced)" : ""}: ${cleanedMessage}`
@@ -2782,17 +3410,80 @@ client.on(
    VOICE ANNOUNCEMENTS
 ========================================================= */
 
+const LOCALIZED_ANNOUNCEMENTS = {
+  english: { join: (n) => `${n} joined the voice channel.`, leave: (n) => `${n} left the voice channel.` },
+  hindi: { join: (n) => `${n} वॉइस चैनल में शामिल हुए।`, leave: (n) => `${n} वॉइस चैनल से चले गए।` },
+  spanish: { join: (n) => `${n} se unió al canal de voz.`, leave: (n) => `${n} salió del canal de voz.` },
+  french: { join: (n) => `${n} a rejoint le salon vocal.`, leave: (n) => `${n} a quitté le salon vocal.` },
+  german: { join: (n) => `${n} ist dem Sprachkanal beigetreten.`, leave: (n) => `${n} hat den Sprachkanal verlassen.` },
+  chinese: { join: (n) => `${n} 加入了语音频道。`, leave: (n) => `${n} 离开了语音频道。` },
+  japanese: { join: (n) => `${n} がボイスチャンネルに参加しました。`, leave: (n) => `${n} がボイスチャンネルから退出しました。` },
+  arabic: { join: (n) => `انضم ${n} إلى القناة الصوتية.`, leave: (n) => `غادر ${n} القناة الصوتية.` },
+  russian: { join: (n) => `${n} присоединился к голосовому каналу.`, leave: (n) => `${n} покинул голосовой канал.` },
+  portuguese: { join: (n) => `${n} entrou no canal de voz.`, leave: (n) => `${n} saiu do canal de voz.` },
+  italian: { join: (n) => `${n} è entrato nel canale vocale.`, leave: (n) => `${n} ha lasciato il canale vocale.` },
+  korean: { join: (n) => `${n}님이 음성 채널에 참여했습니다.`, leave: (n) => `${n}님이 음성 채널에서 나갔습니다.` },
+  bengali: { join: (n) => `${n} ভয়েস চ্যানেলে যোগ দিয়েছেন।`, leave: (n) => `${n} ভয়েস চ্যানেল ছেড়েছেন।` },
+  turkish: { join: (n) => `${n} ses kanalına katıldı.`, leave: (n) => `${n} ses kanalından ayrıldı.` },
+  vietnamese: { join: (n) => `${n} đã tham gia kênh thoại.`, leave: (n) => `${n} đã rời kênh thoại.` },
+  polish: { join: (n) => `${n} dołączył do kanału głosowego.`, leave: (n) => `${n} opuścił kanał głosowy.` },
+  ukrainian: { join: (n) => `${n} приєднався до голосового каналу.`, leave: (n) => `${n} покинув голосовий канал.` },
+  dutch: { join: (n) => `${n} is het spraakkanaal binnengekomen.`, leave: (n) => `${n} heeft het spraakkanaal verlaten.` },
+  greek: { join: (n) => `${n} μπήκε στο κανάλι φωνής.`, leave: (n) => `${n} έφυγε από το κανάλι φωνής.` },
+  swedish: { join: (n) => `${n} gick med i röstkanalen.`, leave: (n) => `${n} lämnade röstkanalen.` },
+  indonesian: { join: (n) => `${n} bergabung ke kanal suara.`, leave: (n) => `${n} meninggalkan kanal suara.` },
+  hebrew: { join: (n) => `${n} הצטרף לערוץ הקולי.`, leave: (n) => `${n} עזב את הערוץ הקולי.` },
+  romanian: { join: (n) => `${n} s-a alăturat canalului vocal.`, leave: (n) => `${n} a părăsit canalul vocal.` },
+  filipino: { join: (n) => `${n} ay sumali sa voice channel.`, leave: (n) => `${n} ay umalis sa voice channel.` },
+  malay: { join: (n) => `${n} menyertai saluran suara.`, leave: (n) => `${n} meninggalkan saluran suara.` },
+  thai: { join: (n) => `${n} เข้าร่วมช่องเสียงแล้ว`, leave: (n) => `${n} ออกจากช่องเสียงแล้ว` },
+  tamil: { join: (n) => `${n} குரல் சேனலில் சேர்ந்தார்.`, leave: (n) => `${n} குரல் சேனலில் இருந்து வெளியேறினார்.` },
+  telugu: { join: (n) => `${n} వాయిస్ ఛానెల్‌లో చేరారు.`, leave: (n) => `${n} వాయిస్ ఛానెల్‌ను వదిలారు.` },
+  marathi: { join: (n) => `${n} व्हॉइस चॅनेलमध्ये सामील झाले.`, leave: (n) => `${n} व्हॉइस चॅनेलमधून बाहेर पडले.` },
+  gujarati: { join: (n) => `${n} વૉઇસ ચેનલમાં જોડાયા.`, leave: (n) => `${n} વૉઇસ ચેનલમાંથી નીકળી ગયા.` },
+  kannada: { join: (n) => `${n} ಧ್ವನಿ ಚಾನೆಲ್‌ಗೆ ಸೇರಿದರು.`, leave: (n) => `${n} ಧ್ವನಿ ಚಾನೆಲ್‌ನಿಂದ ಹೊರಬಂದರು.` },
+  malayalam: { join: (n) => `${n} വോയ്സ് ചാനലിൽ ചേർന്നു.`, leave: (n) => `${n} വോയ്സ് ചാനലിൽ നിന്ന് പുറത്തുപോയി.` },
+  urdu: { join: (n) => `${n} وائس چینل میں شامل ہوئے۔`, leave: (n) => `${n} وائس چینل سے چلے گئے۔` },
+  persian: { join: (n) => `${n} به کانال صوتی پیوست.`, leave: (n) => `${n} کانال صوتی را ترک کرد.` },
+  czech: { join: (n) => `${n} se připojil k hlasovému kanálu.`, leave: (n) => `${n} opustil hlasový kanál.` },
+  hungarian: { join: (n) => `${n} csatlakozott a hangcsatornához.`, leave: (n) => `${n} elhagyta a hangcsatornát.` },
+  finnish: { join: (n) => `${n} liittyi äänikanavalle.`, leave: (n) => `${n} poistui äänikanavalta.` },
+  danish: { join: (n) => `${n} kom ind i stemmekanalen.`, leave: (n) => `${n} forlod stemmekanalen.` },
+  norwegian: { join: (n) => `${n} ble med i talekanalen.`, leave: (n) => `${n} forlot talekanalen.` },
+  croatian: { join: (n) => `${n} se pridružio glasovnom kanalu.`, leave: (n) => `${n} je napustio glasovni kanal.` },
+  slovak: { join: (n) => `${n} sa pripojil k hlasovému kanálu.`, leave: (n) => `${n} opustil hlasový kanál.` },
+  bulgarian: { join: (n) => `${n} се присъедини към гласовия канал.`, leave: (n) => `${n} напусна гласовия канал.` },
+  serbian: { join: (n) => `${n} се придружио гласовном каналу.`, leave: (n) => `${n} је напустио гласовни канал.` },
+  slovenian: { join: (n) => `${n} se je pridružil glasovnemu kanalu.`, leave: (n) => `${n} je zapustil glasovni kanal.` },
+  catalan: { join: (n) => `${n} s'ha unit al canal de veu.`, leave: (n) => `${n} ha sortit del canal de veu.` },
+  irish: { join: (n) => `Chuaigh ${n} isteach sa chainéal gutha.`, leave: (n) => `D'fhág ${n} an cainéal gutha.` },
+  welsh: { join: (n) => `Ymunodd ${n} â'r sianel lais.`, leave: (n) => `Gadawodd ${n} y sianel lais.` },
+  estonian: { join: (n) => `${n} liitus häälkanaliga.`, leave: (n) => `${n} lahkus häälkanalist.` },
+  latvian: { join: (n) => `${n} pievienojās balss kanālam.`, leave: (n) => `${n} pameta balss kanālu.` },
+  lithuanian: { join: (n) => `${n} prisijungė prie balso kanalo.`, leave: (n) => `${n} paliko balso kanalą.` },
+  swahili: { join: (n) => `${n} amejiunga na kituo cha sauti.`, leave: (n) => `${n} ameondoka kwenye kituo cha sauti.` },
+  afrikaans: { join: (n) => `${n} het by die stemkanaal aangesluit.`, leave: (n) => `${n} het die stemkanaal verlaat.` },
+  amharic: { join: (n) => `${n} የድምጽ ቻናሉን ተቀላቀለ።`, leave: (n) => `${n} ከድምጽ ቻናሉ ወጣ።` },
+  yoruba: { join: (n) => `${n} darapọ mọ ikanni ohun.`, leave: (n) => `${n} fi ikanni ohun silẹ.` },
+  zulu: { join: (n) => `${n} ujoyine ishaneli yezwi.`, leave: (n) => `${n} ushiye ishaneli yezwi.` },
+};
+
+function getLocalizedAnnouncementText(guildId, member, event) {
+  const languageKey = getGuildLanguage(guildId, null);
+  const template = LOCALIZED_ANNOUNCEMENTS[languageKey] || LOCALIZED_ANNOUNCEMENTS.english;
+  const name = humanizeDisplayName(member.displayName || member.user.username, guildId, null);
+  return applyHumanPronunciation(template[event](name), guildId, null);
+}
+
 function enqueueVoiceAnnouncement(guildId, state, member, event) {
   const settings = getGuildSettings(guildId);
-  if (!settings.announcements.enabled || !state?.voiceChannelId) return;
+  if (!settings.announcements.enabled || !state?.voiceChannelId || isShuttingDown) return;
   if (!member?.user || member.user.bot) return;
 
-  const name = member.displayName || member.user.username;
-  const speechText = event === "join"
-    ? `${name} joined the voice channel.`
-    : `${name} left the voice channel.`;
+  const speechText = getLocalizedAnnouncementText(guildId, member, event);
 
   state.queue.push({
+    jobId: `announcement:${event}:${member.id}:${Date.now()}`,
     guild: member.guild,
     member,
     userId: member.id,
@@ -2801,8 +3492,10 @@ function enqueueVoiceAnnouncement(guildId, state, member, event) {
     messageReceivedAt: performance.now(),
     attempts: 0,
     isAnnouncement: true,
+    preparedAudioPromise: null,
   });
 
+  if (state.player.state.status === AudioPlayerStatus.Playing) prefetchNextQueuedJob(guildId, state);
   void processGuildQueue(guildId, state);
 }
 
@@ -2856,6 +3549,37 @@ client.on(
   }
 );
 
+
+/* =========================================================
+   GRACEFUL SHUTDOWN / RAILWAY REDEPLOY
+========================================================= */
+
+async function gracefulShutdown(reason = "shutdown") {
+  if (isShuttingDown) return;
+  isShuttingDown = true;
+  console.log(`[Shutdown] Graceful shutdown started (${reason}). Active voice sessions: ${guildStates.size}`);
+
+  for (const guildId of [...guildStates.keys()]) {
+    destroyGuildState(guildId);
+  }
+
+  // Give Discord a moment to receive voice-state disconnects before closing WS.
+  await wait(250).catch(() => {});
+  try { client.destroy(); } catch {}
+  console.log("[Shutdown] Discord client and all voice sessions closed cleanly.");
+}
+
+for (const signal of ["SIGTERM", "SIGINT"]) {
+  process.once(signal, () => {
+    void gracefulShutdown(signal).finally(() => process.exit(0));
+  });
+}
+
+process.on("message", (message) => {
+  if (message?.type === "graceful-shutdown") {
+    void gracefulShutdown("shard-manager").finally(() => process.exit(0));
+  }
+});
 
 /* =========================================================
    ERROR HANDLING
