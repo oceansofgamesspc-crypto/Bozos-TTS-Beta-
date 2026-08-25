@@ -46,6 +46,9 @@ const TTS_CHUNK_TARGET_CHARS = 360;
 const TTS_CHUNK_MAX_CHARS = 480;
 const EDGE_VOICE_REFRESH_MS = 6 * 60 * 60 * 1000;
 const EDGE_VOICE_VALIDATION_TIMEOUT_MS = 8_000;
+const EDGE_VOICE_VERIFIED_TTL_MS = 24 * 60 * 60 * 1000;
+const EDGE_VOICE_BACKGROUND_INTERVAL_MS = 2_500;
+const EDGE_VOICE_ON_DEMAND_CONCURRENCY = 4;
 const EMPTY_CHANNEL_LEAVE_DELAY_MS = 180_000;
 const SPEAKER_REPEAT_WINDOW_MS = 15_000;
 const MAX_JOB_RETRIES = 3;
@@ -398,12 +401,18 @@ const VOICE_MODELS_BY_LOCALE = {
 };
 
 // Live Edge voice catalog. The hardcoded table above is retained only as a
-// boot/offline fallback. /voice prefers Microsoft's currently advertised
-// consumer Edge voices and excludes voices that fail an explicit selection test.
+// boot/offline fallback. /voice shows only voices that have recently passed
+// a real Edge synthesis test; the live advertised catalog is merely the candidate pool.
 let liveEdgeVoicesByLocale = new Map();
 const unhealthyEdgeVoices = new Map();
+const verifiedEdgeVoices = new Map();
+const voiceVerificationInFlight = new Map();
+const backgroundVoiceVerificationQueue = [];
+const queuedBackgroundVoiceVerifications = new Set();
+let backgroundVoiceVerifierBusy = false;
 let edgeVoiceCatalogUpdatedAt = 0;
 let edgeVoiceRefreshTimer = null;
+let edgeVoiceVerificationTimer = null;
 
 function isTemporarilyUnhealthyVoice(voice) {
   const until = unhealthyEdgeVoices.get(voice) || 0;
@@ -415,8 +424,25 @@ function isTemporarilyUnhealthyVoice(voice) {
   return true;
 }
 
+function isRecentlyVerifiedVoice(voice) {
+  const verifiedAt = verifiedEdgeVoices.get(voice) || 0;
+  if (!verifiedAt) return false;
+  if (Date.now() - verifiedAt > EDGE_VOICE_VERIFIED_TTL_MS) {
+    verifiedEdgeVoices.delete(voice);
+    return false;
+  }
+  return !isTemporarilyUnhealthyVoice(voice);
+}
+
+function markVoiceVerified(voice) {
+  if (!voice) return;
+  unhealthyEdgeVoices.delete(voice);
+  verifiedEdgeVoices.set(voice, Date.now());
+}
+
 function markVoiceUnhealthy(voice, ttlMs = 30 * 60 * 1000) {
   if (!voice) return;
+  verifiedEdgeVoices.delete(voice);
   unhealthyEdgeVoices.set(voice, Date.now() + ttlMs);
 }
 
@@ -448,7 +474,6 @@ async function refreshEdgeVoiceCatalog({ force = false } = {}) {
     for (const raw of Array.isArray(advertised) ? advertised : []) {
       const entry = normalizeEdgeVoiceRecord(raw);
       if (!entry.voice || !entry.locale || !/Neural$/i.test(entry.voice)) continue;
-      if (isTemporarilyUnhealthyVoice(entry.voice)) continue;
       if (!next.has(entry.locale)) next.set(entry.locale, []);
       if (!next.get(entry.locale).some((item) => item.voice === entry.voice)) {
         next.get(entry.locale).push(entry);
@@ -467,6 +492,7 @@ async function refreshEdgeVoiceCatalog({ force = false } = {}) {
       edgeVoiceCatalogUpdatedAt = Date.now();
       const total = [...next.values()].reduce((sum, list) => sum + list.length, 0);
       console.log(`[Voice Catalog] Loaded ${total} currently advertised Edge neural voices across ${next.size} locales.`);
+      warmVerifiedVoicePool();
     }
   } catch (error) {
     console.warn('[Voice Catalog] Live refresh failed; keeping safe fallback catalog:', error?.message || error);
@@ -477,39 +503,165 @@ async function refreshEdgeVoiceCatalog({ force = false } = {}) {
   return liveEdgeVoicesByLocale;
 }
 
-async function validateEdgeVoice(voice) {
+async function validateEdgeVoice(voice, { force = false } = {}) {
   if (!voice || isTemporarilyUnhealthyVoice(voice)) return false;
-  const edge = new MsEdgeTTS();
-  let sourceStream = null;
+  if (!force && isRecentlyVerifiedVoice(voice)) return true;
 
+  if (voiceVerificationInFlight.has(voice)) {
+    return voiceVerificationInFlight.get(voice);
+  }
+
+  const validationPromise = (async () => {
+    const edge = new MsEdgeTTS();
+    let sourceStream = null;
+
+    try {
+      await edge.setMetadata(voice, TTS_VOICE_SETTINGS.outputFormat);
+      const result = await Promise.resolve(edge.toStream('OK.', {
+        rate: TTS_VOICE_SETTINGS.rate,
+        pitch: TTS_VOICE_SETTINGS.pitch,
+        volume: TTS_VOICE_SETTINGS.volume,
+      }));
+      sourceStream = result?.audioStream;
+      if (!sourceStream?.once) throw new Error('No audio stream returned.');
+
+      await new Promise((resolve, reject) => {
+        let settled = false;
+        const finish = (fn, value) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          fn(value);
+        };
+        const timer = setTimeout(
+          () => finish(reject, new Error('Voice validation timed out.')),
+          EDGE_VOICE_VALIDATION_TIMEOUT_MS,
+        );
+        sourceStream.once('data', () => finish(resolve));
+        sourceStream.once('error', (error) => finish(reject, error));
+        sourceStream.once('end', () => finish(reject, new Error('Voice produced no audio.')));
+      });
+
+      markVoiceVerified(voice);
+      return true;
+    } catch (error) {
+      markVoiceUnhealthy(voice);
+      console.warn(`[Voice Verify] ${voice} failed live synthesis and was hidden:`, error?.message || error);
+      return false;
+    } finally {
+      try { sourceStream?.destroy?.(); } catch {}
+      try { edge.close(); } catch {}
+    }
+  })();
+
+  voiceVerificationInFlight.set(voice, validationPromise);
   try {
-    await edge.setMetadata(voice, TTS_VOICE_SETTINGS.outputFormat);
-    const result = await Promise.resolve(edge.toStream('Ready.', {
-      rate: TTS_VOICE_SETTINGS.rate,
-      pitch: TTS_VOICE_SETTINGS.pitch,
-      volume: TTS_VOICE_SETTINGS.volume,
-    }));
-    sourceStream = result?.audioStream;
-    if (!sourceStream?.once) throw new Error('No audio stream returned.');
-
-    await new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('Voice validation timed out.')), EDGE_VOICE_VALIDATION_TIMEOUT_MS);
-      const cleanup = () => clearTimeout(timer);
-      sourceStream.once('data', () => { cleanup(); resolve(); });
-      sourceStream.once('error', (error) => { cleanup(); reject(error); });
-      sourceStream.once('end', () => { cleanup(); reject(new Error('Voice produced no audio.')); });
-    });
-
-    return true;
-  } catch (error) {
-    markVoiceUnhealthy(voice);
-    console.warn(`[Voice Catalog] ${voice} failed validation and was temporarily hidden:`, error?.message || error);
-    return false;
+    return await validationPromise;
   } finally {
-    try { sourceStream?.destroy?.(); } catch {}
-    try { edge.close(); } catch {}
+    voiceVerificationInFlight.delete(voice);
   }
 }
+
+function getVerifiedVoiceModelsForLocale(locale) {
+  return getVoiceModelsForLocale(locale).filter((entry) => isRecentlyVerifiedVoice(entry.voice));
+}
+
+async function mapWithConcurrency(items, concurrency, worker) {
+  const results = new Array(items.length);
+  let nextIndex = 0;
+
+  async function runWorker() {
+    while (true) {
+      const index = nextIndex++;
+      if (index >= items.length) return;
+      try {
+        results[index] = await worker(items[index], index);
+      } catch {
+        results[index] = false;
+      }
+    }
+  }
+
+  const workers = Array.from(
+    { length: Math.max(1, Math.min(concurrency, items.length || 1)) },
+    () => runWorker(),
+  );
+  await Promise.all(workers);
+  return results;
+}
+
+async function ensureVerifiedVoicesForLocale(locale) {
+  if (!locale) return [];
+
+  if (!edgeVoiceCatalogUpdatedAt || Date.now() - edgeVoiceCatalogUpdatedAt >= EDGE_VOICE_REFRESH_MS) {
+    await refreshEdgeVoiceCatalog({ force: true }).catch(() => {});
+  }
+
+  const candidates = getVoiceModelsForLocale(locale)
+    .filter((entry) => !isTemporarilyUnhealthyVoice(entry.voice));
+
+  const stale = candidates.filter((entry) => !isRecentlyVerifiedVoice(entry.voice));
+  if (stale.length) {
+    console.log(`[Voice Verify] Fast-tracking ${stale.length} ${locale} voice${stale.length === 1 ? '' : 's'} before opening /voice.`);
+    await mapWithConcurrency(stale, EDGE_VOICE_ON_DEMAND_CONCURRENCY, (entry) => validateEdgeVoice(entry.voice));
+  }
+
+  const verified = getVerifiedVoiceModelsForLocale(locale);
+  console.log(`[Voice Verify] ${locale}: ${verified.length}/${candidates.length} voices passed live synthesis.`);
+  return verified;
+}
+
+function enqueueBackgroundVoiceVerification(entries) {
+  for (const entry of entries || []) {
+    const voice = entry?.voice;
+    if (!voice || isRecentlyVerifiedVoice(voice) || isTemporarilyUnhealthyVoice(voice)) continue;
+    if (queuedBackgroundVoiceVerifications.has(voice) || voiceVerificationInFlight.has(voice)) continue;
+    queuedBackgroundVoiceVerifications.add(voice);
+    backgroundVoiceVerificationQueue.push(voice);
+  }
+}
+
+async function processBackgroundVoiceVerificationQueue() {
+  if (backgroundVoiceVerifierBusy) return;
+  const voice = backgroundVoiceVerificationQueue.shift();
+  if (!voice) return;
+
+  queuedBackgroundVoiceVerifications.delete(voice);
+  if (isRecentlyVerifiedVoice(voice) || isTemporarilyUnhealthyVoice(voice)) return;
+
+  backgroundVoiceVerifierBusy = true;
+  try {
+    await validateEdgeVoice(voice);
+  } finally {
+    backgroundVoiceVerifierBusy = false;
+  }
+}
+
+function warmVerifiedVoicePool() {
+  // Safe fallback voices are queued first so every supported locale gets at
+  // least its long-standing baseline voices checked early. The remaining live
+  // catalog is then verified slowly in the background to avoid hammering Edge.
+  const priority = [];
+  const rest = [];
+  const safeNames = new Set(
+    Object.values(VOICE_MODELS_BY_LOCALE).flat().map((entry) => entry.voice),
+  );
+
+  for (const entries of liveEdgeVoicesByLocale.values()) {
+    for (const entry of entries) {
+      (safeNames.has(entry.voice) ? priority : rest).push(entry);
+    }
+  }
+  for (const entries of Object.values(VOICE_MODELS_BY_LOCALE)) {
+    for (const entry of entries) {
+      if (!priority.some((item) => item.voice === entry.voice)) priority.push(entry);
+    }
+  }
+
+  enqueueBackgroundVoiceVerification(priority);
+  enqueueBackgroundVoiceVerification(rest);
+}
+
 
 const EMOJI_SPOKEN_NAMES = new Map([
   ["😂", "laughing"], ["🤣", "rolling laughing"], ["😭", "crying"],
@@ -1738,6 +1890,7 @@ async function createStreamingTts(text, guildId, userId = null, messageReceivedA
 
       sourceStream.once("data", () => {
         telemetry.firstChunkAt = performance.now();
+        markVoiceVerified(voice);
         console.log(
           `[Latency] Edge first audio chunk: ${Math.round(telemetry.firstChunkAt - messageReceivedAt)} ms ` +
           `(${languageConfig.label} / ${voice}${candidateIndex > 0 ? ' fallback' : ''})`
@@ -2597,6 +2750,13 @@ client.once(
       edgeVoiceRefreshTimer = setInterval(() => { void refreshEdgeVoiceCatalog({ force: true }); }, EDGE_VOICE_REFRESH_MS);
       edgeVoiceRefreshTimer.unref?.();
     }
+    if (!edgeVoiceVerificationTimer) {
+      edgeVoiceVerificationTimer = setInterval(
+        () => { void processBackgroundVoiceVerificationQueue(); },
+        EDGE_VOICE_BACKGROUND_INTERVAL_MS,
+      );
+      edgeVoiceVerificationTimer.unref?.();
+    }
 
     readyClient.user.setPresence({
       activities: [
@@ -2742,27 +2902,27 @@ function generateVoiceMenuComponents(guildId, userId, scope = "server", page = 0
   const targetUserId = scope === "personal" ? userId : null;
   const selection = getGuildLanguageSelection(guildId, targetUserId);
   const locale = getSelectionLocale(selection);
-  const voices = getVoiceModelsForLocale(locale);
-  const fallback = getVoiceForLanguage(selection.language, selection.accent);
-  const available = voices.length ? voices : [{ voice: fallback, gender: "Neural", personalities: [], categories: [] }];
+  const available = getVerifiedVoiceModelsForLocale(locale);
   const pageSize = 25;
   const totalPages = Math.max(1, Math.ceil(available.length / pageSize));
   const currentPage = Math.max(0, Math.min(Number(page) || 0, totalPages - 1));
   const pageVoices = available.slice(currentPage * pageSize, (currentPage + 1) * pageSize);
 
-  const menu = new StringSelectMenuBuilder()
-    .setCustomId(`voice_select_${scope}_${currentPage}`)
-    .setPlaceholder(`Select ${locale} voice${totalPages > 1 ? ` (Page ${currentPage + 1}/${totalPages})` : ''}`)
-    .addOptions(
-      pageVoices.map((entry) =>
-        new StringSelectMenuOptionBuilder()
-          .setLabel(`${getVoicePersonaName(entry.voice)} — ${entry.gender}`.slice(0, 100))
-          .setValue(entry.voice)
-          .setDescription(voiceDescription(entry, locale))
-      )
-    );
-
-  const components = [new ActionRowBuilder().addComponents(menu)];
+  const components = [];
+  if (pageVoices.length) {
+    const menu = new StringSelectMenuBuilder()
+      .setCustomId(`voice_select_${scope}_${currentPage}`)
+      .setPlaceholder(`Select ${locale} verified voice${totalPages > 1 ? ` (Page ${currentPage + 1}/${totalPages})` : ''}`)
+      .addOptions(
+        pageVoices.map((entry) =>
+          new StringSelectMenuOptionBuilder()
+            .setLabel(`${getVoicePersonaName(entry.voice)} — ${entry.gender}`.slice(0, 100))
+            .setValue(entry.voice)
+            .setDescription(`${voiceDescription(entry, locale)} • Verified`.slice(0, 100))
+        )
+      );
+    components.push(new ActionRowBuilder().addComponents(menu));
+  }
   if (totalPages > 1) {
     components.push(
       new ActionRowBuilder().addComponents(
@@ -2825,7 +2985,7 @@ client.on(
           new ContainerBuilder()
             .setAccentColor(COLORS.INFO)
             .addTextDisplayComponents((td) => td.setContent(
-              `## 🎙️ Choose Neural Voice\n**${menu.locale}** • ${menu.voices.length} live/safe voice option${menu.voices.length === 1 ? '' : 's'}${menu.totalPages > 1 ? ` • Page ${menu.currentPage + 1}/${menu.totalPages}` : ''}`
+              `## 🎙️ Choose Neural Voice\n**${menu.locale}** • ${menu.voices.length} verified voice option${menu.voices.length === 1 ? '' : 's'}${menu.totalPages > 1 ? ` • Page ${menu.currentPage + 1}/${menu.totalPages}` : ''}`
             )),
           ...menu.components,
         ],
@@ -2902,10 +3062,8 @@ client.on(
       const selection = getGuildLanguageSelection(interaction.guildId, targetUserId);
       const locale = getSelectionLocale(selection);
       const selectedVoice = String(interaction.values?.[0] || "");
-      const availableVoices = getVoiceModelsForLocale(locale);
-      const isAvailable = availableVoices.length
-        ? availableVoices.some((entry) => entry.voice === selectedVoice)
-        : selectedVoice === getVoiceForLanguage(selection.language, selection.accent);
+      const availableVoices = getVerifiedVoiceModelsForLocale(locale);
+      const isAvailable = availableVoices.some((entry) => entry.voice === selectedVoice);
 
       if (!isAvailable || !isVoiceCompatibleWithSelection(selectedVoice, selection)) {
         return interaction.reply({
@@ -2934,7 +3092,7 @@ client.on(
       // Bozos saves it. This prevents dead/retired Edge voices from becoming a
       // user's persistent choice just because they appeared in a remote list.
       await interaction.deferUpdate().catch(() => {});
-      const worksNow = await validateEdgeVoice(selectedVoice);
+      const worksNow = await validateEdgeVoice(selectedVoice, { force: true });
       if (!worksNow) {
         await refreshEdgeVoiceCatalog({ force: true }).catch(() => {});
         return interaction.editReply({
@@ -3332,12 +3490,23 @@ client.on(
 
       const scope = interaction.options.getString("scope", true);
       const targetUserId = scope === "personal" ? interaction.user.id : null;
-      if (!edgeVoiceCatalogUpdatedAt || Date.now() - edgeVoiceCatalogUpdatedAt >= EDGE_VOICE_REFRESH_MS) {
-        // Keep the interaction fast: refresh in the background and use the last
-        // known live catalog (or safe fallback) for this invocation.
-        void refreshEdgeVoiceCatalog({ force: true });
-      }
-      const { components, locale, selection } = generateVoiceMenuComponents(
+      const selectionBeforeVerify = getGuildLanguageSelection(interaction.guildId, targetUserId);
+      const localeBeforeVerify = getSelectionLocale(selectionBeforeVerify);
+
+      await interaction.reply({
+        components: [
+          new ContainerBuilder()
+            .setAccentColor(COLORS.INFO)
+            .addTextDisplayComponents((td) => td.setContent(
+              `## 🔎 Verifying ${localeBeforeVerify} Voices\nBozos is live-testing available voices. Only voices that actually return audio will be shown.`
+            )),
+        ],
+        flags: MessageFlags.IsComponentsV2 | MessageFlags.Ephemeral,
+      });
+
+      await ensureVerifiedVoicesForLocale(localeBeforeVerify);
+
+      const { components, locale, selection, voices } = generateVoiceMenuComponents(
         interaction.guildId,
         interaction.user.id,
         scope
@@ -3347,21 +3516,23 @@ client.on(
       const languageLabel = getLanguageVariantLabel(selection.language, selection.accent);
 
       const menuContainer = new ContainerBuilder()
-        .setAccentColor(COLORS.INFO)
+        .setAccentColor(voices.length ? COLORS.SUCCESS : COLORS.WARNING)
         .addTextDisplayComponents((td) => td.setContent(
-          [
-            "## 🎙️ Choose Bozos TTS Voice",
-            scope === "personal"
-              ? "This changes your personal neural voice only."
-              : "This changes the server default neural voice.",
-            `Language: **${languageLabel}**`,
-            `Current voice: **${currentInfo.name} — ${currentInfo.gender}** (${locale})`,
-          ].join("\n")
+          voices.length
+            ? [
+                "## 🎙️ Choose Bozos TTS Voice",
+                scope === "personal"
+                  ? "This changes your personal neural voice only."
+                  : "This changes the server default neural voice.",
+                `Language: **${languageLabel}**`,
+                `Current voice: **${currentInfo.name} — ${currentInfo.gender}** (${locale})`,
+                `Available now: **${voices.length} live-verified voice${voices.length === 1 ? '' : 's'}**`,
+              ].join("\n")
+            : `## ⚠️ No Verified ${locale} Voices Right Now\nBozos tested the currently available voices for **${languageLabel}**, but none returned audio. Your existing/default voice was left unchanged. Try \`/voice\` again later.`
         ));
 
-      return interaction.reply({
+      return interaction.editReply({
         components: [menuContainer, ...components],
-        flags: MessageFlags.IsComponentsV2 | MessageFlags.Ephemeral,
       });
     }
 
@@ -3860,6 +4031,12 @@ async function gracefulShutdown(reason = "shutdown") {
     clearInterval(edgeVoiceRefreshTimer);
     edgeVoiceRefreshTimer = null;
   }
+  if (edgeVoiceVerificationTimer) {
+    clearInterval(edgeVoiceVerificationTimer);
+    edgeVoiceVerificationTimer = null;
+  }
+  backgroundVoiceVerificationQueue.length = 0;
+  queuedBackgroundVoiceVerifications.clear();
 
   // Give Discord a moment to receive voice-state disconnects before closing WS.
   await wait(250).catch(() => {});
