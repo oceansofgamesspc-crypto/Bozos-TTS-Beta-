@@ -69,6 +69,35 @@ const TTS_VOICE_SETTINGS = {
   timeout: 30_000,
 };
 
+// msedge-tts currently assumes every incoming Edge frame still has a live
+// request entry. If a stream is cancelled (skip, disconnect, timeout), a late
+// WebSocket frame can arrive after the library deletes that entry and throw
+// `Cannot read properties of undefined (reading 'audio')`. Keep the upstream
+// library untouched and make each instance tolerant of those late frames.
+function createSafeMsEdgeTTS() {
+  const edge = new MsEdgeTTS();
+  const streams = edge?._streams;
+
+  if (streams && typeof streams === "object") {
+    const ignoredStream = {
+      turnEnded: true,
+      audio: { push() {}, destroy() {} },
+      metadata: { push() {}, destroy() {} },
+    };
+
+    edge._streams = new Proxy(streams, {
+      get(target, property, receiver) {
+        if (Reflect.has(target, property)) {
+          return Reflect.get(target, property, receiver);
+        }
+        return typeof property === "string" ? ignoredStream : undefined;
+      },
+    });
+  }
+
+  return edge;
+}
+
 
 const VOICE_ACCENTS = {
   english: {
@@ -466,7 +495,7 @@ async function refreshEdgeVoiceCatalog({ force = false } = {}) {
     return liveEdgeVoicesByLocale;
   }
 
-  const edge = new MsEdgeTTS();
+  const edge = createSafeMsEdgeTTS();
   try {
     const advertised = await edge.getVoices();
     const next = new Map();
@@ -512,7 +541,7 @@ async function validateEdgeVoice(voice, { force = false } = {}) {
   }
 
   const validationPromise = (async () => {
-    const edge = new MsEdgeTTS();
+    const edge = createSafeMsEdgeTTS();
     let sourceStream = null;
 
     try {
@@ -525,21 +554,35 @@ async function validateEdgeVoice(voice, { force = false } = {}) {
       sourceStream = result?.audioStream;
       if (!sourceStream?.once) throw new Error('No audio stream returned.');
 
+      // Drain the complete tiny synthesis instead of destroying the stream on
+      // its first chunk. msedge-tts removes a request from its internal map when
+      // the Readable is destroyed; Edge may still have already-sent frames in
+      // flight, which used to trigger an uncaught `_streams[requestId].audio`
+      // access inside the dependency.
       await new Promise((resolve, reject) => {
         let settled = false;
+        let receivedAudio = false;
+
         const finish = (fn, value) => {
           if (settled) return;
           settled = true;
           clearTimeout(timer);
           fn(value);
         };
+
         const timer = setTimeout(
           () => finish(reject, new Error('Voice validation timed out.')),
           EDGE_VOICE_VALIDATION_TIMEOUT_MS,
         );
-        sourceStream.once('data', () => finish(resolve));
+
+        sourceStream.on('data', (chunk) => {
+          if (chunk?.length > 0) receivedAudio = true;
+        });
         sourceStream.once('error', (error) => finish(reject, error));
-        sourceStream.once('end', () => finish(reject, new Error('Voice produced no audio.')));
+        sourceStream.once('end', () => {
+          if (receivedAudio) finish(resolve);
+          else finish(reject, new Error('Voice produced no audio.'));
+        });
       });
 
       markVoiceVerified(voice);
@@ -549,8 +592,11 @@ async function validateEdgeVoice(voice, { force = false } = {}) {
       console.warn(`[Voice Verify] ${voice} failed live synthesis and was hidden:`, error?.message || error);
       return false;
     } finally {
-      try { sourceStream?.destroy?.(); } catch {}
+      // On successful validation the stream has already ended naturally. On a
+      // timeout/error, close the socket first and then release the local stream.
+      // createSafeMsEdgeTTS() safely ignores any late frames already in flight.
       try { edge.close(); } catch {}
+      try { sourceStream?.destroy?.(); } catch {}
     }
   })();
 
@@ -1860,7 +1906,7 @@ async function createStreamingTts(text, guildId, userId = null, messageReceivedA
 
   for (let candidateIndex = 0; candidateIndex < candidates.length; candidateIndex++) {
     const voice = candidates[candidateIndex];
-    const edgeTts = new MsEdgeTTS();
+    const edgeTts = createSafeMsEdgeTTS();
     const synthesisStartedAt = performance.now();
 
     try {
@@ -3526,7 +3572,6 @@ client.on(
                   : "This changes the server default neural voice.",
                 `Language: **${languageLabel}**`,
                 `Current voice: **${currentInfo.name} — ${currentInfo.gender}** (${locale})`,
-                `Available now: **${voices.length} live-verified voice${voices.length === 1 ? '' : 's'}**`,
               ].join("\n")
             : `## ⚠️ No Verified ${locale} Voices Right Now\nBozos tested the currently available voices for **${languageLabel}**, but none returned audio. Your existing/default voice was left unchanged. Try \`/voice\` again later.`
         ));
