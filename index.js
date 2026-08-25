@@ -44,11 +44,10 @@ const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 
 const TTS_CHUNK_TARGET_CHARS = 360;
 const TTS_CHUNK_MAX_CHARS = 480;
-const EDGE_VOICE_REFRESH_MS = 6 * 60 * 60 * 1000;
+const EDGE_VOICE_REFRESH_MS = 24 * 60 * 60 * 1000;
 const EDGE_VOICE_VALIDATION_TIMEOUT_MS = 8_000;
-const EDGE_VOICE_VERIFIED_TTL_MS = 24 * 60 * 60 * 1000;
-const EDGE_VOICE_BACKGROUND_INTERVAL_MS = 2_500;
-const EDGE_VOICE_ON_DEMAND_CONCURRENCY = 4;
+const EDGE_VOICE_GLOBAL_VERIFY_CONCURRENCY = 6;
+const EDGE_VOICE_VERIFY_MIN_START_GAP_MS = 100;
 const EMPTY_CHANNEL_LEAVE_DELAY_MS = 180_000;
 const SPEAKER_REPEAT_WINDOW_MS = 15_000;
 const MAX_JOB_RETRIES = 3;
@@ -436,12 +435,13 @@ let liveEdgeVoicesByLocale = new Map();
 const unhealthyEdgeVoices = new Map();
 const verifiedEdgeVoices = new Map();
 const voiceVerificationInFlight = new Map();
-const backgroundVoiceVerificationQueue = [];
-const queuedBackgroundVoiceVerifications = new Set();
-let backgroundVoiceVerifierBusy = false;
+let activeVoiceVerifications = 0;
+const voiceVerificationSlotWaiters = [];
+let lastVoiceVerificationStartedAt = 0;
+let edgeVoiceCatalogRefreshInFlight = null;
 let edgeVoiceCatalogUpdatedAt = 0;
-let edgeVoiceRefreshTimer = null;
-let edgeVoiceVerificationTimer = null;
+let startupVoiceVerificationInFlight = null;
+let startupVoiceVerificationCompletedAt = 0;
 
 function isTemporarilyUnhealthyVoice(voice) {
   const until = unhealthyEdgeVoices.get(voice) || 0;
@@ -454,25 +454,45 @@ function isTemporarilyUnhealthyVoice(voice) {
 }
 
 function isRecentlyVerifiedVoice(voice) {
-  const verifiedAt = verifiedEdgeVoices.get(voice) || 0;
-  if (!verifiedAt) return false;
-  if (Date.now() - verifiedAt > EDGE_VOICE_VERIFIED_TTL_MS) {
-    verifiedEdgeVoices.delete(voice);
-    return false;
-  }
-  return !isTemporarilyUnhealthyVoice(voice);
+  return Boolean(voice && verifiedEdgeVoices.has(voice) && !isTemporarilyUnhealthyVoice(voice));
 }
 
-function markVoiceVerified(voice) {
+function markVoiceVerified(voice, verifiedAt = Date.now()) {
   if (!voice) return;
   unhealthyEdgeVoices.delete(voice);
-  verifiedEdgeVoices.set(voice, Date.now());
+  verifiedEdgeVoices.set(voice, verifiedAt);
 }
 
-function markVoiceUnhealthy(voice, ttlMs = 30 * 60 * 1000) {
+function markVoiceUnhealthy(voice, ttlMs = Infinity) {
   if (!voice) return;
   verifiedEdgeVoices.delete(voice);
-  unhealthyEdgeVoices.set(voice, Date.now() + ttlMs);
+  unhealthyEdgeVoices.set(voice, ttlMs === Infinity ? Infinity : Date.now() + ttlMs);
+}
+
+async function acquireVoiceVerificationSlot() {
+  if (activeVoiceVerifications >= EDGE_VOICE_GLOBAL_VERIFY_CONCURRENCY) {
+    await new Promise((resolve) => voiceVerificationSlotWaiters.push(resolve));
+  }
+
+  activeVoiceVerifications += 1;
+  const waitMs = Math.max(0, EDGE_VOICE_VERIFY_MIN_START_GAP_MS - (Date.now() - lastVoiceVerificationStartedAt));
+  if (waitMs) await wait(waitMs);
+  lastVoiceVerificationStartedAt = Date.now();
+}
+
+function releaseVoiceVerificationSlot() {
+  activeVoiceVerifications = Math.max(0, activeVoiceVerifications - 1);
+  const next = voiceVerificationSlotWaiters.shift();
+  if (next) next();
+}
+
+async function withVoiceVerificationSlot(worker) {
+  await acquireVoiceVerificationSlot();
+  try {
+    return await worker();
+  } finally {
+    releaseVoiceVerificationSlot();
+  }
 }
 
 function normalizeEdgeVoiceRecord(raw) {
@@ -495,52 +515,64 @@ async function refreshEdgeVoiceCatalog({ force = false } = {}) {
     return liveEdgeVoicesByLocale;
   }
 
-  const edge = createSafeMsEdgeTTS();
-  try {
-    const advertised = await edge.getVoices();
-    const next = new Map();
+  // One shared catalog request per process. A burst of /voice commands cannot
+  // fan out into many simultaneous Edge getVoices() calls.
+  if (edgeVoiceCatalogRefreshInFlight) return edgeVoiceCatalogRefreshInFlight;
 
-    for (const raw of Array.isArray(advertised) ? advertised : []) {
-      const entry = normalizeEdgeVoiceRecord(raw);
-      if (!entry.voice || !entry.locale || !/Neural$/i.test(entry.voice)) continue;
-      if (!next.has(entry.locale)) next.set(entry.locale, []);
-      if (!next.get(entry.locale).some((item) => item.voice === entry.voice)) {
-        next.get(entry.locale).push(entry);
+  edgeVoiceCatalogRefreshInFlight = (async () => {
+    const edge = createSafeMsEdgeTTS();
+    try {
+      const advertised = await edge.getVoices();
+      const next = new Map();
+
+      for (const raw of Array.isArray(advertised) ? advertised : []) {
+        const entry = normalizeEdgeVoiceRecord(raw);
+        if (!entry.voice || !entry.locale || !/Neural$/i.test(entry.voice)) continue;
+        if (!next.has(entry.locale)) next.set(entry.locale, []);
+        if (!next.get(entry.locale).some((item) => item.voice === entry.voice)) {
+          next.get(entry.locale).push(entry);
+        }
       }
+
+      for (const entries of next.values()) {
+        entries.sort((a, b) => {
+          if (a.gender !== b.gender) return a.gender === "Female" ? -1 : b.gender === "Female" ? 1 : 0;
+          return getVoicePersonaName(a.voice).localeCompare(getVoicePersonaName(b.voice));
+        });
+      }
+
+      if (next.size) {
+        liveEdgeVoicesByLocale = next;
+        edgeVoiceCatalogUpdatedAt = Date.now();
+        const total = [...next.values()].reduce((sum, list) => sum + list.length, 0);
+        console.log(`[Voice Catalog] Loaded ${total} currently advertised Edge neural voices across ${next.size} locales.`);
+        // Synthesis verification is handled only by the one startup sweep.
+        // /voice never triggers Edge requests.
+      }
+    } catch (error) {
+      console.warn('[Voice Catalog] Live refresh failed; keeping safe fallback catalog:', error?.message || error);
+    } finally {
+      try { edge.close(); } catch {}
     }
 
-    for (const entries of next.values()) {
-      entries.sort((a, b) => {
-        if (a.gender !== b.gender) return a.gender === "Female" ? -1 : b.gender === "Female" ? 1 : 0;
-        return getVoicePersonaName(a.voice).localeCompare(getVoicePersonaName(b.voice));
-      });
-    }
+    return liveEdgeVoicesByLocale;
+  })();
 
-    if (next.size) {
-      liveEdgeVoicesByLocale = next;
-      edgeVoiceCatalogUpdatedAt = Date.now();
-      const total = [...next.values()].reduce((sum, list) => sum + list.length, 0);
-      console.log(`[Voice Catalog] Loaded ${total} currently advertised Edge neural voices across ${next.size} locales.`);
-      warmVerifiedVoicePool();
-    }
-  } catch (error) {
-    console.warn('[Voice Catalog] Live refresh failed; keeping safe fallback catalog:', error?.message || error);
+  try {
+    return await edgeVoiceCatalogRefreshInFlight;
   } finally {
-    try { edge.close(); } catch {}
+    edgeVoiceCatalogRefreshInFlight = null;
   }
-
-  return liveEdgeVoicesByLocale;
 }
 
-async function validateEdgeVoice(voice, { force = false } = {}) {
-  if (!voice || isTemporarilyUnhealthyVoice(voice)) return false;
-  if (!force && isRecentlyVerifiedVoice(voice)) return true;
+async function validateEdgeVoice(voice) {
+  if (!voice) return false;
 
   if (voiceVerificationInFlight.has(voice)) {
     return voiceVerificationInFlight.get(voice);
   }
 
-  const validationPromise = (async () => {
+  const validationPromise = withVoiceVerificationSlot(async () => {
     const edge = createSafeMsEdgeTTS();
     let sourceStream = null;
 
@@ -554,11 +586,8 @@ async function validateEdgeVoice(voice, { force = false } = {}) {
       sourceStream = result?.audioStream;
       if (!sourceStream?.once) throw new Error('No audio stream returned.');
 
-      // Drain the complete tiny synthesis instead of destroying the stream on
-      // its first chunk. msedge-tts removes a request from its internal map when
-      // the Readable is destroyed; Edge may still have already-sent frames in
-      // flight, which used to trigger an uncaught `_streams[requestId].audio`
-      // access inside the dependency.
+      // Drain the complete tiny synthesis. Destroying after the first chunk can
+      // race msedge-tts with late WebSocket frames.
       await new Promise((resolve, reject) => {
         let settled = false;
         let receivedAudio = false;
@@ -585,20 +614,15 @@ async function validateEdgeVoice(voice, { force = false } = {}) {
         });
       });
 
-      markVoiceVerified(voice);
       return true;
     } catch (error) {
-      markVoiceUnhealthy(voice);
-      console.warn(`[Voice Verify] ${voice} failed live synthesis and was hidden:`, error?.message || error);
+      console.warn(`[Voice Verify] ${voice} failed the startup synthesis check:`, error?.message || error);
       return false;
     } finally {
-      // On successful validation the stream has already ended naturally. On a
-      // timeout/error, close the socket first and then release the local stream.
-      // createSafeMsEdgeTTS() safely ignores any late frames already in flight.
       try { edge.close(); } catch {}
       try { sourceStream?.destroy?.(); } catch {}
     }
-  })();
+  });
 
   voiceVerificationInFlight.set(voice, validationPromise);
   try {
@@ -637,76 +661,84 @@ async function mapWithConcurrency(items, concurrency, worker) {
 }
 
 async function ensureVerifiedVoicesForLocale(locale) {
-  if (!locale) return [];
-
-  if (!edgeVoiceCatalogUpdatedAt || Date.now() - edgeVoiceCatalogUpdatedAt >= EDGE_VOICE_REFRESH_MS) {
-    await refreshEdgeVoiceCatalog({ force: true }).catch(() => {});
-  }
-
-  const candidates = getVoiceModelsForLocale(locale)
-    .filter((entry) => !isTemporarilyUnhealthyVoice(entry.voice));
-
-  const stale = candidates.filter((entry) => !isRecentlyVerifiedVoice(entry.voice));
-  if (stale.length) {
-    console.log(`[Voice Verify] Fast-tracking ${stale.length} ${locale} voice${stale.length === 1 ? '' : 's'} before opening /voice.`);
-    await mapWithConcurrency(stale, EDGE_VOICE_ON_DEMAND_CONCURRENCY, (entry) => validateEdgeVoice(entry.voice));
-  }
-
-  const verified = getVerifiedVoiceModelsForLocale(locale);
-  console.log(`[Voice Verify] ${locale}: ${verified.length}/${candidates.length} voices passed live synthesis.`);
-  return verified;
+  // Read-only snapshot lookup. This function deliberately performs no Edge
+  // network request and no synthesis.
+  return getVerifiedVoiceModelsForLocale(locale);
 }
 
-function enqueueBackgroundVoiceVerification(entries) {
-  for (const entry of entries || []) {
-    const voice = entry?.voice;
-    if (!voice || isRecentlyVerifiedVoice(voice) || isTemporarilyUnhealthyVoice(voice)) continue;
-    if (queuedBackgroundVoiceVerifications.has(voice) || voiceVerificationInFlight.has(voice)) continue;
-    queuedBackgroundVoiceVerifications.add(voice);
-    backgroundVoiceVerificationQueue.push(voice);
-  }
-}
-
-async function processBackgroundVoiceVerificationQueue() {
-  if (backgroundVoiceVerifierBusy) return;
-  const voice = backgroundVoiceVerificationQueue.shift();
-  if (!voice) return;
-
-  queuedBackgroundVoiceVerifications.delete(voice);
-  if (isRecentlyVerifiedVoice(voice) || isTemporarilyUnhealthyVoice(voice)) return;
-
-  backgroundVoiceVerifierBusy = true;
-  try {
-    await validateEdgeVoice(voice);
-  } finally {
-    backgroundVoiceVerifierBusy = false;
-  }
-}
-
-function warmVerifiedVoicePool() {
-  // Safe fallback voices are queued first so every supported locale gets at
-  // least its long-standing baseline voices checked early. The remaining live
-  // catalog is then verified slowly in the background to avoid hammering Edge.
-  const priority = [];
-  const rest = [];
-  const safeNames = new Set(
-    Object.values(VOICE_MODELS_BY_LOCALE).flat().map((entry) => entry.voice),
-  );
+function getAllEdgeVoiceCandidates() {
+  const byVoice = new Map();
 
   for (const entries of liveEdgeVoicesByLocale.values()) {
-    for (const entry of entries) {
-      (safeNames.has(entry.voice) ? priority : rest).push(entry);
-    }
-  }
-  for (const entries of Object.values(VOICE_MODELS_BY_LOCALE)) {
-    for (const entry of entries) {
-      if (!priority.some((item) => item.voice === entry.voice)) priority.push(entry);
+    for (const entry of entries || []) {
+      if (entry?.voice && !byVoice.has(entry.voice)) byVoice.set(entry.voice, entry);
     }
   }
 
-  enqueueBackgroundVoiceVerification(priority);
-  enqueueBackgroundVoiceVerification(rest);
+  for (const [locale, entries] of Object.entries(VOICE_MODELS_BY_LOCALE)) {
+    for (const entry of entries || []) {
+      if (!entry?.voice || byVoice.has(entry.voice)) continue;
+      byVoice.set(entry.voice, { ...entry, locale: entry.locale || locale });
+    }
+  }
+
+  return [...byVoice.values()];
 }
+
+async function runStartupVoiceVerification() {
+  if (startupVoiceVerificationInFlight) return startupVoiceVerificationInFlight;
+  if (startupVoiceVerificationCompletedAt) return verifiedEdgeVoices.size;
+
+  startupVoiceVerificationInFlight = (async () => {
+    const cycleStartedAt = Date.now();
+    console.log('[Voice Verify] Starting one-time startup verification sweep. /voice will not trigger any synthesis checks.');
+
+    await refreshEdgeVoiceCatalog({ force: true }).catch(() => {});
+    const candidates = getAllEdgeVoiceCandidates();
+    console.log(`[Voice Verify] Startup candidate pool: ${candidates.length} voices across ${new Set(candidates.map((entry) => entry.locale || getVoiceLocale(entry.voice))).size} locales.`);
+
+    const results = await mapWithConcurrency(
+      candidates,
+      EDGE_VOICE_GLOBAL_VERIFY_CONCURRENCY,
+      async (entry) => ({ entry, works: await validateEdgeVoice(entry.voice) }),
+    );
+
+    // Publish the verified snapshot only after the complete startup sweep has
+    // finished. It remains frozen for this entire process lifetime. Failed
+    // voices stay unavailable until the bot restarts and performs a new sweep.
+    const completedAt = Date.now();
+    const nextVerified = new Map();
+    const nextFailed = new Map();
+
+    for (const result of results) {
+      const voice = result?.entry?.voice;
+      if (!voice) continue;
+      if (result.works) nextVerified.set(voice, completedAt);
+      else nextFailed.set(voice, Infinity);
+    }
+
+    verifiedEdgeVoices.clear();
+    for (const [voice, at] of nextVerified) verifiedEdgeVoices.set(voice, at);
+    unhealthyEdgeVoices.clear();
+    for (const [voice, until] of nextFailed) unhealthyEdgeVoices.set(voice, until);
+
+    startupVoiceVerificationCompletedAt = completedAt;
+    console.log(
+      `[Voice Verify] Startup sweep complete in ${Math.round((completedAt - cycleStartedAt) / 1000)}s: ` +
+      `${nextVerified.size}/${candidates.length} voices verified, ${nextFailed.size} unavailable. ` +
+      `This snapshot will be reused unchanged until the next bot restart.`
+    );
+
+    return nextVerified.size;
+  })();
+
+  try {
+    return await startupVoiceVerificationInFlight;
+  } finally {
+    startupVoiceVerificationInFlight = null;
+  }
+}
+
 
 
 const EMOJI_SPOKEN_NAMES = new Map([
@@ -1936,7 +1968,6 @@ async function createStreamingTts(text, guildId, userId = null, messageReceivedA
 
       sourceStream.once("data", () => {
         telemetry.firstChunkAt = performance.now();
-        markVoiceVerified(voice);
         console.log(
           `[Latency] Edge first audio chunk: ${Math.round(telemetry.firstChunkAt - messageReceivedAt)} ms ` +
           `(${languageConfig.label} / ${voice}${candidateIndex > 0 ? ' fallback' : ''})`
@@ -2791,18 +2822,9 @@ client.once(
   async (readyClient) => {
     console.log(`Logged in as ${readyClient.user.tag}`);
     console.log(`[Pronunciation] Grand pronunciation engine ${PRONUNCIATION_ENGINE_VERSION} loaded.`);
-    void refreshEdgeVoiceCatalog({ force: true });
-    if (!edgeVoiceRefreshTimer) {
-      edgeVoiceRefreshTimer = setInterval(() => { void refreshEdgeVoiceCatalog({ force: true }); }, EDGE_VOICE_REFRESH_MS);
-      edgeVoiceRefreshTimer.unref?.();
-    }
-    if (!edgeVoiceVerificationTimer) {
-      edgeVoiceVerificationTimer = setInterval(
-        () => { void processBackgroundVoiceVerificationQueue(); },
-        EDGE_VOICE_BACKGROUND_INTERVAL_MS,
-      );
-      edgeVoiceVerificationTimer.unref?.();
-    }
+    // Build the complete verified voice snapshot exactly once per process start.
+    // /voice and voice selection are read-only consumers for the rest of the run.
+    void runStartupVoiceVerification();
 
     readyClient.user.setPresence({
       activities: [
@@ -3134,24 +3156,9 @@ client.on(
         }).catch(() => {});
       }
 
-      // A voice must prove that it can actually return audio right now before
-      // Bozos saves it. This prevents dead/retired Edge voices from becoming a
-      // user's persistent choice just because they appeared in a remote list.
-      await interaction.deferUpdate().catch(() => {});
-      const worksNow = await validateEdgeVoice(selectedVoice, { force: true });
-      if (!worksNow) {
-        await refreshEdgeVoiceCatalog({ force: true }).catch(() => {});
-        return interaction.editReply({
-          components: [
-            new ContainerBuilder()
-              .setAccentColor(COLORS.ERROR)
-              .addTextDisplayComponents((td) => td.setContent(
-                `## ❌ Voice Unavailable\n**${getVoicePersonaName(selectedVoice)}** did not produce audio right now, so Bozos did **not** save it. Run \`/voice\` again to choose another live voice.`
-              )),
-          ],
-        }).catch(() => {});
-      }
-
+      // The startup sweep is the only code path allowed to verification-test
+      // voices. Selection performs no Edge request; if it is in this menu, it
+      // already belongs to the frozen startup snapshot.
       if (scope === "personal") {
         settings.userVoices[interaction.user.id] = selectedVoice;
       } else {
@@ -3536,21 +3543,17 @@ client.on(
 
       const scope = interaction.options.getString("scope", true);
       const targetUserId = scope === "personal" ? interaction.user.id : null;
-      const selectionBeforeVerify = getGuildLanguageSelection(interaction.guildId, targetUserId);
-      const localeBeforeVerify = getSelectionLocale(selectionBeforeVerify);
 
-      await interaction.reply({
-        components: [
-          new ContainerBuilder()
-            .setAccentColor(COLORS.INFO)
-            .addTextDisplayComponents((td) => td.setContent(
-              `## 🔎 Verifying ${localeBeforeVerify} Voices\nBozos is live-testing available voices. Only voices that actually return audio will be shown.`
-            )),
-        ],
-        flags: MessageFlags.IsComponentsV2 | MessageFlags.Ephemeral,
-      });
-
-      await ensureVerifiedVoicesForLocale(localeBeforeVerify);
+      if (!startupVoiceVerificationCompletedAt) {
+        return replyWithV2(interaction, {
+          title: "Voice Pool Is Warming Up",
+          description: startupVoiceVerificationInFlight
+            ? "Bozos is running its one-time startup voice verification sweep. No `/voice` request can start extra Edge tests. Please try again after the sweep finishes."
+            : "The verified voice snapshot is not available yet. It is created once when this bot process starts.",
+          color: COLORS.WARNING,
+          ephemeral: true,
+        });
+      }
 
       const { components, locale, selection, voices } = generateVoiceMenuComponents(
         interaction.guildId,
@@ -3573,11 +3576,12 @@ client.on(
                 `Language: **${languageLabel}**`,
                 `Current voice: **${currentInfo.name} — ${currentInfo.gender}** (${locale})`,
               ].join("\n")
-            : `## ⚠️ No Verified ${locale} Voices Right Now\nBozos tested the currently available voices for **${languageLabel}**, but none returned audio. Your existing/default voice was left unchanged. Try \`/voice\` again later.`
+            : `## ⚠️ No Verified ${locale} Voices\nNo voice for **${languageLabel}** passed the startup verification sweep. Your existing/default voice was left unchanged. Bozos will test the full catalog again only after the next bot restart.`
         ));
 
-      return interaction.editReply({
+      return interaction.reply({
         components: [menuContainer, ...components],
+        flags: MessageFlags.IsComponentsV2 | MessageFlags.Ephemeral,
       });
     }
 
@@ -4072,16 +4076,7 @@ async function gracefulShutdown(reason = "shutdown") {
   for (const guildId of [...guildStates.keys()]) {
     destroyGuildState(guildId);
   }
-  if (edgeVoiceRefreshTimer) {
-    clearInterval(edgeVoiceRefreshTimer);
-    edgeVoiceRefreshTimer = null;
-  }
-  if (edgeVoiceVerificationTimer) {
-    clearInterval(edgeVoiceVerificationTimer);
-    edgeVoiceVerificationTimer = null;
-  }
-  backgroundVoiceVerificationQueue.length = 0;
-  queuedBackgroundVoiceVerifications.clear();
+  voiceVerificationSlotWaiters.splice(0).forEach((resolve) => resolve());
 
   // Give Discord a moment to receive voice-state disconnects before closing WS.
   await wait(250).catch(() => {});
