@@ -49,7 +49,7 @@ const EDGE_VOICE_VALIDATION_TIMEOUT_MS = 8_000;
 const EDGE_VOICE_GLOBAL_VERIFY_CONCURRENCY = 6;
 const EDGE_VOICE_VERIFY_MIN_START_GAP_MS = 100;
 const EMPTY_CHANNEL_LEAVE_DELAY_MS = 180_000;
-const SPEAKER_REPEAT_WINDOW_MS = 15_000;
+const SPEAKER_REPEAT_WINDOW_MS = 8_000;
 const MAX_JOB_RETRIES = 3;
 const RETRY_DELAY_MS = 750;
 const MAX_VOLUME = 2.0;
@@ -728,6 +728,68 @@ async function runStartupVoiceVerification() {
       `${nextVerified.size}/${candidates.length} voices verified, ${nextFailed.size} unavailable. ` +
       `This snapshot will be reused unchanged until the next bot restart.`
     );
+
+    // ONE-TIME EXPORT BUILD: save and print the exact verified startup snapshot.
+    // This does not perform any extra synthesis; it only serializes the results
+    // that were already produced by the normal startup sweep above.
+    const verifiedEntries = results
+      .filter((result) => result?.works && result?.entry?.voice)
+      .map((result) => ({
+        voice: result.entry.voice,
+        locale: result.entry.locale || getVoiceLocale(result.entry.voice),
+        gender: result.entry.gender || "Neural",
+        personalities: Array.isArray(result.entry.personalities) ? result.entry.personalities : [],
+        categories: Array.isArray(result.entry.categories) ? result.entry.categories : [],
+      }))
+      .sort((a, b) => a.locale.localeCompare(b.locale) || a.voice.localeCompare(b.voice));
+
+    const verifiedByLocale = {};
+    for (const entry of verifiedEntries) {
+      if (!verifiedByLocale[entry.locale]) verifiedByLocale[entry.locale] = [];
+      verifiedByLocale[entry.locale].push({
+        voice: entry.voice,
+        gender: entry.gender,
+        personalities: entry.personalities,
+        categories: entry.categories,
+      });
+    }
+
+    const failedVoices = results
+      .filter((result) => result && !result.works && result?.entry?.voice)
+      .map((result) => ({
+        voice: result.entry.voice,
+        locale: result.entry.locale || getVoiceLocale(result.entry.voice),
+        gender: result.entry.gender || "Neural",
+      }))
+      .sort((a, b) => a.locale.localeCompare(b.locale) || a.voice.localeCompare(b.voice));
+
+    const snapshot = {
+      generatedAt: new Date(completedAt).toISOString(),
+      advertisedCatalogVoices: [...liveEdgeVoicesByLocale.values()].reduce((sum, list) => sum + (list?.length || 0), 0),
+      startupCandidates: candidates.length,
+      verifiedCount: verifiedEntries.length,
+      failedCount: failedVoices.length,
+      verifiedVoicesByLocale: verifiedByLocale,
+      failedVoices,
+    };
+
+    try {
+      const snapshotPath = path.join(process.cwd(), "verified-voices-snapshot.json");
+      fs.writeFileSync(snapshotPath, JSON.stringify(snapshot, null, 2), "utf8");
+      console.log(`[Voice Verify Export] Saved full snapshot to ${snapshotPath}`);
+    } catch (error) {
+      console.warn('[Voice Verify Export] Could not write verified-voices-snapshot.json:', error?.message || error);
+    }
+
+    // Railway logs are the universal fallback: one compact line per locale,
+    // small enough to copy without relying on a giant single log line.
+    console.log(`[Voice Verify Export] SNAPSHOT_BEGIN verified=${verifiedEntries.length} failed=${failedVoices.length}`);
+    for (const locale of Object.keys(verifiedByLocale).sort()) {
+      const compact = verifiedByLocale[locale].map(({ voice, gender }) => ({ voice, gender }));
+      console.log(`[Voice Verify Export] ${locale} ${JSON.stringify(compact)}`);
+    }
+    console.log(`[Voice Verify Export] FAILED ${JSON.stringify(failedVoices)}`);
+    console.log('[Voice Verify Export] SNAPSHOT_END');
 
     return nextVerified.size;
   })();
@@ -3575,6 +3637,9 @@ client.on(
                   : "This changes the server default neural voice.",
                 `Language: **${languageLabel}**`,
                 `Current voice: **${currentInfo.name} — ${currentInfo.gender}** (${locale})`,
+                `Verified pool: **${voices.length} working voice${voices.length === 1 ? '' : 's'}**`,
+                `Full catalog verification ran once at **bot startup**: <t:${Math.floor(startupVoiceVerificationCompletedAt / 1000)}:R>. It will not run again until the next restart.`,
+                "Opening `/voice` or selecting a voice performs **zero** Edge verification requests.",
               ].join("\n")
             : `## ⚠️ No Verified ${locale} Voices\nNo voice for **${languageLabel}** passed the startup verification sweep. Your existing/default voice was left unchanged. Bozos will test the full catalog again only after the next bot restart.`
         ));
