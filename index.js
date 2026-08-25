@@ -42,9 +42,12 @@ import path from "node:path";
 
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 
-const MAX_MESSAGE_LENGTH = 500;
+const TTS_CHUNK_TARGET_CHARS = 360;
+const TTS_CHUNK_MAX_CHARS = 480;
+const EDGE_VOICE_REFRESH_MS = 6 * 60 * 60 * 1000;
+const EDGE_VOICE_VALIDATION_TIMEOUT_MS = 8_000;
 const EMPTY_CHANNEL_LEAVE_DELAY_MS = 180_000;
-const SPEAKER_REPEAT_WINDOW_MS = 8_000;
+const SPEAKER_REPEAT_WINDOW_MS = 15_000;
 const MAX_JOB_RETRIES = 3;
 const RETRY_DELAY_MS = 750;
 const MAX_VOLUME = 2.0;
@@ -394,6 +397,119 @@ const VOICE_MODELS_BY_LOCALE = {
   ],
 };
 
+// Live Edge voice catalog. The hardcoded table above is retained only as a
+// boot/offline fallback. /voice prefers Microsoft's currently advertised
+// consumer Edge voices and excludes voices that fail an explicit selection test.
+let liveEdgeVoicesByLocale = new Map();
+const unhealthyEdgeVoices = new Map();
+let edgeVoiceCatalogUpdatedAt = 0;
+let edgeVoiceRefreshTimer = null;
+
+function isTemporarilyUnhealthyVoice(voice) {
+  const until = unhealthyEdgeVoices.get(voice) || 0;
+  if (!until) return false;
+  if (Date.now() >= until) {
+    unhealthyEdgeVoices.delete(voice);
+    return false;
+  }
+  return true;
+}
+
+function markVoiceUnhealthy(voice, ttlMs = 30 * 60 * 1000) {
+  if (!voice) return;
+  unhealthyEdgeVoices.set(voice, Date.now() + ttlMs);
+}
+
+function normalizeEdgeVoiceRecord(raw) {
+  const voice = raw?.ShortName || raw?.shortName || raw?.Name || raw?.name || "";
+  const locale = raw?.Locale || raw?.locale || getVoiceLocale(voice);
+  const genderRaw = String(raw?.Gender || raw?.gender || "Neural");
+  const gender = /^female$/i.test(genderRaw) ? "Female" : /^male$/i.test(genderRaw) ? "Male" : "Neural";
+  const tags = raw?.VoiceTag || raw?.voiceTag || {};
+  const personalities = Array.isArray(tags?.VoicePersonalities)
+    ? tags.VoicePersonalities
+    : Array.isArray(tags?.voicePersonalities) ? tags.voicePersonalities : [];
+  const categories = Array.isArray(tags?.ContentCategories)
+    ? tags.ContentCategories
+    : Array.isArray(tags?.contentCategories) ? tags.contentCategories : [];
+  return { voice, locale, gender, personalities, categories };
+}
+
+async function refreshEdgeVoiceCatalog({ force = false } = {}) {
+  if (!force && edgeVoiceCatalogUpdatedAt && Date.now() - edgeVoiceCatalogUpdatedAt < EDGE_VOICE_REFRESH_MS) {
+    return liveEdgeVoicesByLocale;
+  }
+
+  const edge = new MsEdgeTTS();
+  try {
+    const advertised = await edge.getVoices();
+    const next = new Map();
+
+    for (const raw of Array.isArray(advertised) ? advertised : []) {
+      const entry = normalizeEdgeVoiceRecord(raw);
+      if (!entry.voice || !entry.locale || !/Neural$/i.test(entry.voice)) continue;
+      if (isTemporarilyUnhealthyVoice(entry.voice)) continue;
+      if (!next.has(entry.locale)) next.set(entry.locale, []);
+      if (!next.get(entry.locale).some((item) => item.voice === entry.voice)) {
+        next.get(entry.locale).push(entry);
+      }
+    }
+
+    for (const entries of next.values()) {
+      entries.sort((a, b) => {
+        if (a.gender !== b.gender) return a.gender === "Female" ? -1 : b.gender === "Female" ? 1 : 0;
+        return getVoicePersonaName(a.voice).localeCompare(getVoicePersonaName(b.voice));
+      });
+    }
+
+    if (next.size) {
+      liveEdgeVoicesByLocale = next;
+      edgeVoiceCatalogUpdatedAt = Date.now();
+      const total = [...next.values()].reduce((sum, list) => sum + list.length, 0);
+      console.log(`[Voice Catalog] Loaded ${total} currently advertised Edge neural voices across ${next.size} locales.`);
+    }
+  } catch (error) {
+    console.warn('[Voice Catalog] Live refresh failed; keeping safe fallback catalog:', error?.message || error);
+  } finally {
+    try { edge.close(); } catch {}
+  }
+
+  return liveEdgeVoicesByLocale;
+}
+
+async function validateEdgeVoice(voice) {
+  if (!voice || isTemporarilyUnhealthyVoice(voice)) return false;
+  const edge = new MsEdgeTTS();
+  let sourceStream = null;
+
+  try {
+    await edge.setMetadata(voice, TTS_VOICE_SETTINGS.outputFormat);
+    const result = await Promise.resolve(edge.toStream('Ready.', {
+      rate: TTS_VOICE_SETTINGS.rate,
+      pitch: TTS_VOICE_SETTINGS.pitch,
+      volume: TTS_VOICE_SETTINGS.volume,
+    }));
+    sourceStream = result?.audioStream;
+    if (!sourceStream?.once) throw new Error('No audio stream returned.');
+
+    await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('Voice validation timed out.')), EDGE_VOICE_VALIDATION_TIMEOUT_MS);
+      const cleanup = () => clearTimeout(timer);
+      sourceStream.once('data', () => { cleanup(); resolve(); });
+      sourceStream.once('error', (error) => { cleanup(); reject(error); });
+      sourceStream.once('end', () => { cleanup(); reject(new Error('Voice produced no audio.')); });
+    });
+
+    return true;
+  } catch (error) {
+    markVoiceUnhealthy(voice);
+    console.warn(`[Voice Catalog] ${voice} failed validation and was temporarily hidden:`, error?.message || error);
+    return false;
+  } finally {
+    try { sourceStream?.destroy?.(); } catch {}
+    try { edge.close(); } catch {}
+  }
+}
 
 const EMOJI_SPOKEN_NAMES = new Map([
   ["😂", "laughing"], ["🤣", "rolling laughing"], ["😭", "crying"],
@@ -631,11 +747,17 @@ function getSelectionLocale(selection) {
 }
 
 function getVoiceModelsForLocale(locale) {
-  return VOICE_MODELS_BY_LOCALE[locale] || [];
+  const live = liveEdgeVoicesByLocale.get(locale) || [];
+  const fallback = VOICE_MODELS_BY_LOCALE[locale] || [];
+  const merged = [...live];
+  for (const entry of fallback) {
+    if (!merged.some((item) => item.voice === entry.voice)) merged.push(entry);
+  }
+  return merged.filter((entry) => !isTemporarilyUnhealthyVoice(entry.voice));
 }
 
 function isListedEdgeVoice(voice) {
-  if (!voice) return false;
+  if (!voice || isTemporarilyUnhealthyVoice(voice)) return false;
   const locale = getVoiceLocale(voice);
   return getVoiceModelsForLocale(locale).some((entry) => entry.voice === voice);
 }
@@ -716,7 +838,7 @@ function getLanguageListString() {
    Built-in only: no user/server editing commands.
 ========================================================= */
 
-const PRONUNCIATION_ENGINE_VERSION = "2026.08.24";
+const PRONUNCIATION_ENGINE_VERSION = "2026.08.25-v2";
 
 function spellLetters(value) {
   return String(value || "")
@@ -1066,14 +1188,56 @@ function applyCommonInitialisms(text) {
 
 function normalizeExpressiveSpelling(text) {
   return String(text || "")
-    // "brooooo" -> "broo"; keep some emphasis without making TTS drone.
-    .replace(/([A-Za-z])\1{2,}/g, "$1$1")
+    // Keep a hint of emphasis without letting a held key become a multi-second drone.
+    .replace(/([\p{L}])\1{3,}/giu, "$1$1")
+    .replace(/([!?])\1{2,}/g, "$1$1")
     .replace(/\s+/g, " ")
     .trim();
 }
 
+function normalizeConversationalExpressions(text, languageKey = "english") {
+  let output = String(text || "");
+
+  // Unicode-styled Discord text (𝓗𝓮𝓵𝓵𝓸, full-width text, etc.) becomes normal
+  // readable characters before the pronunciation rules run.
+  output = output.normalize('NFKC').replace(/[\u200B-\u200D\u2060\uFEFF]/g, '');
+
+  // Common text laughter should sound like laughter rather than a long sequence
+  // of individual syllables/letters. Keep this language-aware where conventions differ.
+  if (languageKey === 'spanish') {
+    output = output.replace(/\b(?:ja){3,}j?a?\b/gi, 'jajaja');
+  } else if (languageKey === 'portuguese') {
+    output = output.replace(/\b(?:k{3,}|(?:rs){2,})\b/gi, 'haha');
+  } else if (languageKey === 'japanese') {
+    output = output.replace(/(?:ｗ|w){3,}/giu, '笑い');
+  } else {
+    output = output.replace(/\b(?:ha){3,}h?a?\b/gi, 'haha');
+    output = output.replace(/\b(?:he){3,}h?e?\b/gi, 'hehe');
+  }
+
+  // Human-friendly emoticons. Emoji glyphs are handled by normalizeEmoji().
+  output = output
+    .replace(/<3/g, ' heart ')
+    .replace(/(?<!\S):-?\)(?!\S)/g, ' smile ')
+    .replace(/(?<!\S):-?\((?!\S)/g, ' sad ')
+    .replace(/(?<!\S);-?\)(?!\S)/g, ' wink ');
+
+  // Make common English shorthand read naturally without expanding ambiguous
+  // ordinary words in other languages.
+  if (languageKey === 'english') {
+    output = output
+      .replace(/\blol+\b/gi, 'laughing')
+      .replace(/\bthx\b/gi, 'thanks')
+      .replace(/\btho\b/gi, 'though')
+      .replace(/\bprob\b/gi, 'probably');
+  }
+
+  return output.replace(/\s+/g, ' ').trim();
+}
+
 function applyGrandPronunciation(text, { languageKey = "english", mode = "speech" } = {}) {
-  let output = normalizeExpressiveSpelling(text);
+  let output = normalizeConversationalExpressions(text, languageKey);
+  output = normalizeExpressiveSpelling(output);
 
   // Protect real dotted product/runtime names such as Node.js and .NET before
   // the generic filename-extension reader handles package.json/index.js.
@@ -1100,7 +1264,10 @@ function decodeEmbeddedLeetspeak(token) {
 }
 
 function humanizeDisplayName(name) {
-  let output = String(name || "someone").trim();
+  let output = String(name || "someone")
+    .normalize('NFKC')
+    .replace(/[\u200B-\u200D\u2060\uFEFF]/g, '')
+    .trim();
 
   // Remove common decorative xX...Xx wrappers without touching normal names.
   const hadDecorativeXPrefix = /^[_.\-~|]*[xX]{2}(?=[A-Za-z0-9])/.test(output);
@@ -1531,59 +1698,77 @@ async function createStreamingTts(text, guildId, userId = null, messageReceivedA
   if (!cleanText) throw new Error("TTS text cannot be empty.");
 
   const languageConfig = getGuildLanguageConfig(guildId, userId);
-  const voice = getEffectiveVoice(guildId, userId);
-  const edgeTts = new MsEdgeTTS();
-  const synthesisStartedAt = performance.now();
+  const selectedVoice = getEffectiveVoice(guildId, userId);
+  const locale = getVoiceLocale(selectedVoice);
+  const alternates = getVoiceModelsForLocale(locale)
+    .map((entry) => entry.voice)
+    .filter((voice) => voice !== selectedVoice);
+  const candidates = [selectedVoice, ...alternates].filter(Boolean).slice(0, 3);
+  let lastError = null;
 
-  try {
-    await edgeTts.setMetadata(voice, TTS_VOICE_SETTINGS.outputFormat);
-    const metadataReadyAt = performance.now();
-    const result = await Promise.resolve(
-      edgeTts.toStream(escapeSsmlText(cleanText), {
-        rate: TTS_VOICE_SETTINGS.rate,
-        pitch: TTS_VOICE_SETTINGS.pitch,
-        volume: TTS_VOICE_SETTINGS.volume,
-      })
-    );
+  for (let candidateIndex = 0; candidateIndex < candidates.length; candidateIndex++) {
+    const voice = candidates[candidateIndex];
+    const edgeTts = new MsEdgeTTS();
+    const synthesisStartedAt = performance.now();
 
-    const sourceStream = result?.audioStream;
-    if (!sourceStream?.pipe) throw new Error("Edge TTS did not return a readable audio stream.");
-
-    // A bounded PassThrough lets the next queued message begin synthesising while
-    // the current one is still speaking, without buffering an unlimited file in RAM.
-    const audioStream = new PassThrough({ highWaterMark: PREFETCH_BUFFER_BYTES });
-    const telemetry = {
-      synthesisStartedAt,
-      metadataReadyAt,
-      firstChunkAt: null,
-      messageReceivedAt,
-      voice,
-      languageLabel: languageConfig.label,
-    };
-
-    sourceStream.once("data", () => {
-      telemetry.firstChunkAt = performance.now();
-      console.log(
-        `[Latency] Edge first audio chunk: ${Math.round(telemetry.firstChunkAt - messageReceivedAt)} ms ` +
-        `(${languageConfig.label} / ${voice})`
+    try {
+      await edgeTts.setMetadata(voice, TTS_VOICE_SETTINGS.outputFormat);
+      const metadataReadyAt = performance.now();
+      const result = await Promise.resolve(
+        edgeTts.toStream(escapeSsmlText(cleanText), {
+          rate: TTS_VOICE_SETTINGS.rate,
+          pitch: TTS_VOICE_SETTINGS.pitch,
+          volume: TTS_VOICE_SETTINGS.volume,
+        })
       );
-    });
 
-    sourceStream.once("error", (error) => {
-      audioStream.destroy(error);
-      try { edgeTts.close(); } catch {}
-    });
-    sourceStream.once("end", () => {
-      try { edgeTts.close(); } catch {}
-    });
+      const sourceStream = result?.audioStream;
+      if (!sourceStream?.pipe) throw new Error("Edge TTS did not return a readable audio stream.");
 
-    sourceStream.pipe(audioStream);
-    return { audioStream, sourceStream, edgeTts, telemetry };
-  } catch (error) {
-    try { edgeTts.close(); } catch {}
-    throw error;
+      const audioStream = new PassThrough({ highWaterMark: PREFETCH_BUFFER_BYTES });
+      const telemetry = {
+        synthesisStartedAt,
+        metadataReadyAt,
+        firstChunkAt: null,
+        messageReceivedAt,
+        voice,
+        languageLabel: languageConfig.label,
+        fallbackUsed: candidateIndex > 0,
+      };
+
+      sourceStream.once("data", () => {
+        telemetry.firstChunkAt = performance.now();
+        console.log(
+          `[Latency] Edge first audio chunk: ${Math.round(telemetry.firstChunkAt - messageReceivedAt)} ms ` +
+          `(${languageConfig.label} / ${voice}${candidateIndex > 0 ? ' fallback' : ''})`
+        );
+      });
+
+      sourceStream.once("error", (error) => {
+        // If this specific voice stream fails, temporarily remove it from the
+        // effective catalog so the queue retry can select a same-locale fallback.
+        markVoiceUnhealthy(voice);
+        audioStream.destroy(error);
+        try { edgeTts.close(); } catch {}
+      });
+      sourceStream.once("end", () => {
+        try { edgeTts.close(); } catch {}
+      });
+
+      sourceStream.pipe(audioStream);
+      return { audioStream, sourceStream, edgeTts, telemetry };
+    } catch (error) {
+      lastError = error;
+      try { edgeTts.close(); } catch {}
+      if (candidateIndex === 0 && candidates.length > 1) {
+        console.warn(`[TTS] Preferred voice ${voice} failed before playback; trying a same-locale fallback.`);
+      }
+    }
   }
+
+  throw lastError || new Error('No usable Edge voice was available for this locale.');
 }
+
 
 function cleanupPreparedAudio(prepared) {
   if (!prepared) return;
@@ -2321,6 +2506,53 @@ function replaceDiscordMentions(text, message) {
   return output;
 }
 
+function splitLongSpeechText(text, locale = "en-US") {
+  const source = String(text || "").replace(/\s+/g, " " ).trim();
+  if (!source) return [];
+  if (source.length <= TTS_CHUNK_MAX_CHARS) return [source];
+
+  let sentences = [];
+  try {
+    const segmenter = new Intl.Segmenter(locale, { granularity: 'sentence' });
+    sentences = [...segmenter.segment(source)].map((item) => item.segment.trim()).filter(Boolean);
+  } catch {
+    sentences = source.match(/[^.!?。！？]+[.!?。！？]+|[^.!?。！？]+$/gu)?.map((item) => item.trim()).filter(Boolean) || [source];
+  }
+
+  const pieces = [];
+  const splitOversized = (segment) => {
+    let remaining = segment.trim();
+    while (remaining.length > TTS_CHUNK_MAX_CHARS) {
+      let cut = remaining.lastIndexOf(' ', TTS_CHUNK_MAX_CHARS);
+      if (cut < Math.floor(TTS_CHUNK_MAX_CHARS * 0.55)) {
+        const comma = Math.max(remaining.lastIndexOf(', ', TTS_CHUNK_MAX_CHARS), remaining.lastIndexOf('; ', TTS_CHUNK_MAX_CHARS));
+        cut = comma > 0 ? comma + 1 : TTS_CHUNK_MAX_CHARS;
+      }
+      pieces.push(remaining.slice(0, cut).trim());
+      remaining = remaining.slice(cut).trim();
+    }
+    if (remaining) pieces.push(remaining);
+  };
+
+  for (const sentence of sentences) splitOversized(sentence);
+
+  const chunks = [];
+  let current = '';
+  for (const piece of pieces) {
+    if (!current) { current = piece; continue; }
+    const candidate = `${current} ${piece}`;
+    if (candidate.length <= TTS_CHUNK_TARGET_CHARS || (current.length < TTS_CHUNK_TARGET_CHARS * 0.55 && candidate.length <= TTS_CHUNK_MAX_CHARS)) {
+      current = candidate;
+    } else {
+      chunks.push(current);
+      current = piece;
+    }
+  }
+  if (current) chunks.push(current);
+
+  return chunks.filter(Boolean);
+}
+
 function prepareMessageForSpeech(message, userId = null) {
   let text = String(message?.content || "").trim();
   if (!text && !message?.attachments?.size) return "";
@@ -2342,10 +2574,6 @@ function prepareMessageForSpeech(message, userId = null) {
   text = `${text}${attachmentText}`.trim();
   text = text.replace(/\s+/g, " ").trim();
 
-  if (text.length > MAX_MESSAGE_LENGTH) {
-    text = `${text.slice(0, MAX_MESSAGE_LENGTH - 3).trimEnd()}...`;
-  }
-
   return text;
 }
 
@@ -2364,6 +2592,11 @@ client.once(
   async (readyClient) => {
     console.log(`Logged in as ${readyClient.user.tag}`);
     console.log(`[Pronunciation] Grand pronunciation engine ${PRONUNCIATION_ENGINE_VERSION} loaded.`);
+    void refreshEdgeVoiceCatalog({ force: true });
+    if (!edgeVoiceRefreshTimer) {
+      edgeVoiceRefreshTimer = setInterval(() => { void refreshEdgeVoiceCatalog({ force: true }); }, EDGE_VOICE_REFRESH_MS);
+      edgeVoiceRefreshTimer.unref?.();
+    }
 
     readyClient.user.setPresence({
       activities: [
@@ -2496,53 +2729,60 @@ function generateLanguageMenuComponents(page = 0, scope = "server") {
   return { components: [rowMenu, rowButtons], currentPage, totalPages };
 }
 
-function generateVoiceMenuComponents(guildId, userId, scope = "server") {
+function voiceDescription(entry, locale) {
+  const traits = [...(entry.personalities || []), ...(entry.categories || [])]
+    .filter(Boolean)
+    .slice(0, 2)
+    .join(', ');
+  const base = `${locale} • ${entry.gender} neural voice`;
+  return (traits ? `${base} • ${traits}` : base).slice(0, 100);
+}
+
+function generateVoiceMenuComponents(guildId, userId, scope = "server", page = 0) {
   const targetUserId = scope === "personal" ? userId : null;
   const selection = getGuildLanguageSelection(guildId, targetUserId);
   const locale = getSelectionLocale(selection);
   const voices = getVoiceModelsForLocale(locale);
-
-  if (!voices.length) {
-    const fallback = getVoiceForLanguage(selection.language, selection.accent);
-    return {
-      locale,
-      selection,
-      voices: [{ voice: fallback, gender: "Neural" }],
-      components: [
-        new ActionRowBuilder().addComponents(
-          new StringSelectMenuBuilder()
-            .setCustomId(`voice_select_${scope}`)
-            .setPlaceholder("Select neural voice")
-            .addOptions(
-              new StringSelectMenuOptionBuilder()
-                .setLabel(`${getVoicePersonaName(fallback)} — Neural`)
-                .setValue(fallback)
-                .setDescription(`${locale} • Default voice`)
-            )
-        ),
-      ],
-    };
-  }
+  const fallback = getVoiceForLanguage(selection.language, selection.accent);
+  const available = voices.length ? voices : [{ voice: fallback, gender: "Neural", personalities: [], categories: [] }];
+  const pageSize = 25;
+  const totalPages = Math.max(1, Math.ceil(available.length / pageSize));
+  const currentPage = Math.max(0, Math.min(Number(page) || 0, totalPages - 1));
+  const pageVoices = available.slice(currentPage * pageSize, (currentPage + 1) * pageSize);
 
   const menu = new StringSelectMenuBuilder()
-    .setCustomId(`voice_select_${scope}`)
-    .setPlaceholder(`Select ${locale} voice`)
+    .setCustomId(`voice_select_${scope}_${currentPage}`)
+    .setPlaceholder(`Select ${locale} voice${totalPages > 1 ? ` (Page ${currentPage + 1}/${totalPages})` : ''}`)
     .addOptions(
-      voices.map((entry) =>
+      pageVoices.map((entry) =>
         new StringSelectMenuOptionBuilder()
-          .setLabel(`${getVoicePersonaName(entry.voice)} — ${entry.gender}`)
+          .setLabel(`${getVoicePersonaName(entry.voice)} — ${entry.gender}`.slice(0, 100))
           .setValue(entry.voice)
-          .setDescription(`${locale} • ${entry.gender} neural voice`)
+          .setDescription(voiceDescription(entry, locale))
       )
     );
 
-  return {
-    locale,
-    selection,
-    voices,
-    components: [new ActionRowBuilder().addComponents(menu)],
-  };
+  const components = [new ActionRowBuilder().addComponents(menu)];
+  if (totalPages > 1) {
+    components.push(
+      new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId(`voice_page_${scope}_${currentPage - 1}`)
+          .setLabel('⬅️ Previous')
+          .setStyle(ButtonStyle.Secondary)
+          .setDisabled(currentPage === 0),
+        new ButtonBuilder()
+          .setCustomId(`voice_page_${scope}_${currentPage + 1}`)
+          .setLabel('Next ➡️')
+          .setStyle(ButtonStyle.Secondary)
+          .setDisabled(currentPage >= totalPages - 1),
+      )
+    );
+  }
+
+  return { locale, selection, voices: available, components, currentPage, totalPages };
 }
+
 
 
 client.on(
@@ -2566,6 +2806,28 @@ client.on(
               `## 🌐 Choose Bozos TTS Language\n${scope === "personal" ? "This changes your personal language and accent only." : "This changes the server default language and accent."}`
             )),
           ...components,
+        ],
+      }).catch(() => {});
+      return;
+    }
+
+    // Handle Pagination Buttons for /voice menu
+    if (interaction.isButton() && interaction.customId.startsWith("voice_page_")) {
+      const voiceError = requireSameVoiceChannel(interaction);
+      if (voiceError) {
+        return interaction.reply({ content: `🔊 ${voiceError}`, flags: MessageFlags.Ephemeral });
+      }
+      const [, , scope, page] = interaction.customId.split("_");
+      const pageNum = parseInt(page, 10);
+      const menu = generateVoiceMenuComponents(interaction.guildId, interaction.user.id, scope || "server", pageNum);
+      await interaction.update({
+        components: [
+          new ContainerBuilder()
+            .setAccentColor(COLORS.INFO)
+            .addTextDisplayComponents((td) => td.setContent(
+              `## 🎙️ Choose Neural Voice\n**${menu.locale}** • ${menu.voices.length} live/safe voice option${menu.voices.length === 1 ? '' : 's'}${menu.totalPages > 1 ? ` • Page ${menu.currentPage + 1}/${menu.totalPages}` : ''}`
+            )),
+          ...menu.components,
         ],
       }).catch(() => {});
       return;
@@ -2634,7 +2896,8 @@ client.on(
         return interaction.reply({ content: `🔊 ${voiceError}`, flags: MessageFlags.Ephemeral });
       }
 
-      const scope = interaction.customId.slice("voice_select_".length) || "server";
+      const voiceSelectParts = interaction.customId.split("_");
+      const scope = voiceSelectParts[2] || "server";
       const targetUserId = scope === "personal" ? interaction.user.id : null;
       const selection = getGuildLanguageSelection(interaction.guildId, targetUserId);
       const locale = getSelectionLocale(selection);
@@ -2667,13 +2930,31 @@ client.on(
         }).catch(() => {});
       }
 
+      // A voice must prove that it can actually return audio right now before
+      // Bozos saves it. This prevents dead/retired Edge voices from becoming a
+      // user's persistent choice just because they appeared in a remote list.
+      await interaction.deferUpdate().catch(() => {});
+      const worksNow = await validateEdgeVoice(selectedVoice);
+      if (!worksNow) {
+        await refreshEdgeVoiceCatalog({ force: true }).catch(() => {});
+        return interaction.editReply({
+          components: [
+            new ContainerBuilder()
+              .setAccentColor(COLORS.ERROR)
+              .addTextDisplayComponents((td) => td.setContent(
+                `## ❌ Voice Unavailable\n**${getVoicePersonaName(selectedVoice)}** did not produce audio right now, so Bozos did **not** save it. Run \`/voice\` again to choose another live voice.`
+              )),
+          ],
+        }).catch(() => {});
+      }
+
       if (scope === "personal") {
         settings.userVoices[interaction.user.id] = selectedVoice;
       } else {
         settings.serverVoice = selectedVoice;
       }
 
-      return interaction.update({
+      return interaction.editReply({
         components: [
           new ContainerBuilder()
             .setAccentColor(COLORS.SUCCESS)
@@ -3051,6 +3332,11 @@ client.on(
 
       const scope = interaction.options.getString("scope", true);
       const targetUserId = scope === "personal" ? interaction.user.id : null;
+      if (!edgeVoiceCatalogUpdatedAt || Date.now() - edgeVoiceCatalogUpdatedAt >= EDGE_VOICE_REFRESH_MS) {
+        // Keep the interaction fast: refresh in the background and use the last
+        // known live catalog (or safe fallback) for this invocation.
+        void refreshEdgeVoiceCatalog({ force: true });
+      }
       const { components, locale, selection } = generateVoiceMenuComponents(
         interaction.guildId,
         interaction.user.id,
@@ -3366,28 +3652,36 @@ client.on(
       queuedAt
     );
 
-    const speechText = buildSpeechText(
-      speakerName,
-      cleanedMessage,
-      message.guildId,
-      message.author.id,
-      includeSpeakerName
-    );
+    const locale = getGuildLanguageConfig(message.guildId, message.author.id).lang || "en-US";
+    const speechChunks = splitLongSpeechText(cleanedMessage, locale);
+    if (!speechChunks.length) return;
 
     state.lastQueuedSpeakerId = message.author.id;
     state.lastQueuedSpeakerAt = queuedAt;
 
-    state.queue.push({
-      jobId: message.id,
-      messageId: message.id,
-      guild: message.guild,
-      member,
-      userId: message.author.id,
-      voiceChannelId: state.voiceChannelId,
-      speechText,
-      messageReceivedAt: queuedAt,
-      attempts: 0,
-      preparedAudioPromise: null,
+    speechChunks.forEach((chunk, index) => {
+      const speechText = buildSpeechText(
+        speakerName,
+        chunk,
+        message.guildId,
+        message.author.id,
+        includeSpeakerName && index === 0
+      );
+
+      state.queue.push({
+        jobId: `${message.id}:${index}`,
+        messageId: message.id,
+        chunkIndex: index,
+        chunkCount: speechChunks.length,
+        guild: message.guild,
+        member,
+        userId: message.author.id,
+        voiceChannelId: state.voiceChannelId,
+        speechText,
+        messageReceivedAt: queuedAt,
+        attempts: 0,
+        preparedAudioPromise: null,
+      });
     });
 
     if (state.player.state.status === AudioPlayerStatus.Playing) {
@@ -3395,7 +3689,8 @@ client.on(
     }
 
     console.log(
-      `[TTS] Queued message from ${speakerName}${includeSpeakerName ? " (speaker announced)" : ""}: ${cleanedMessage}`
+      `[TTS] Queued message from ${speakerName}${includeSpeakerName ? " (speaker announced)" : ""}` +
+      `${speechChunks.length > 1 ? ` in ${speechChunks.length} natural chunks` : ''}: ${cleanedMessage}`
     );
 
     void processGuildQueue(
@@ -3561,6 +3856,10 @@ async function gracefulShutdown(reason = "shutdown") {
 
   for (const guildId of [...guildStates.keys()]) {
     destroyGuildState(guildId);
+  }
+  if (edgeVoiceRefreshTimer) {
+    clearInterval(edgeVoiceRefreshTimer);
+    edgeVoiceRefreshTimer = null;
   }
 
   // Give Discord a moment to receive voice-state disconnects before closing WS.
