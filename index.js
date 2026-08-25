@@ -2380,6 +2380,74 @@ const SUPPORT_SERVER_URL = process.env.SUPPORT_SERVER_URL || "https://discord.gg
 
 const SUPPORT_USER_ID = "1458470088759054525";
 
+// /join activation gate. The support guild ID is resolved once from the existing
+// support invite, so no extra Railway variable is required. SUPPORT_GUILD_ID can
+// still be supplied explicitly as an optional fallback/override.
+let supportGuildId = process.env.SUPPORT_GUILD_ID || null;
+let supportGuildResolvePromise = null;
+
+function getSupportInviteCode() {
+  try {
+    const url = new URL(SUPPORT_SERVER_URL);
+    return url.pathname.split("/").filter(Boolean).pop() || null;
+  } catch {
+    return String(SUPPORT_SERVER_URL || "").split("/").filter(Boolean).pop() || null;
+  }
+}
+
+async function resolveSupportGuild() {
+  if (supportGuildId) {
+    return client.guilds.cache.get(supportGuildId) ||
+      await client.guilds.fetch(supportGuildId).catch(() => null);
+  }
+
+  if (!supportGuildResolvePromise) {
+    supportGuildResolvePromise = (async () => {
+      const inviteCode = getSupportInviteCode();
+      if (!inviteCode) return null;
+
+      const invite = await client.fetchInvite(inviteCode);
+      supportGuildId = invite?.guild?.id || null;
+      if (!supportGuildId) return null;
+
+      return client.guilds.cache.get(supportGuildId) ||
+        await client.guilds.fetch(supportGuildId).catch(() => null);
+    })()
+      .catch((error) => {
+        console.warn("[Support Gate] Could not resolve the support server:", error?.message || error);
+        return null;
+      })
+      .finally(() => {
+        supportGuildResolvePromise = null;
+      });
+  }
+
+  return supportGuildResolvePromise;
+}
+
+async function getSupportMembershipStatus(userId) {
+  const supportGuild = await resolveSupportGuild();
+  if (!supportGuild) return "unavailable";
+
+  try {
+    // Force a direct REST lookup so a user who leaves the support server is not
+    // accepted from a stale member cache. Fetching one known member does not
+    // require enabling the privileged GuildMembers gateway intent.
+    await supportGuild.members.fetch({ user: userId, force: true });
+    return "member";
+  } catch (error) {
+    if (error?.code === 10007 || error?.status === 404) {
+      return "not_member";
+    }
+
+    console.warn(
+      `[Support Gate] Membership lookup failed for ${userId}:`,
+      error?.message || error
+    );
+    return "unavailable";
+  }
+}
+
 function getBotInviteUrl() {
   const clientId = process.env.CLIENT_ID || process.env.DISCORD_CLIENT_ID || client.user?.id;
 
@@ -4547,6 +4615,14 @@ client.once(
       `Runtime voice verification is disabled.`
     );
 
+    void resolveSupportGuild().then((guild) => {
+      if (guild) {
+        console.log(`[Support Gate] Membership verification ready for ${guild.name} (${guild.id}).`);
+      } else {
+        console.warn("[Support Gate] Support server could not be resolved; /join will fail open until verification is available.");
+      }
+    });
+
     readyClient.user.setPresence({
       activities: [
         {
@@ -4738,9 +4814,205 @@ function generateVoiceMenuComponents(guildId, userId, scope = "server", page = 0
 
 
 
+function buildSupportMembershipGate(userId, stillMissing = false) {
+  const message = stillMissing
+    ? "I still can’t see you in the **Bozos Support Server** yet. If you just joined, give Discord a moment and press **I’ve Joined — Continue** again."
+    : "To use `/join`, the person bringing Bozos TTS into a voice channel must be a member of the **Bozos Support Server**. It’s a one-time, quick step that keeps support, updates, and outage notices in one place.";
+
+  return new ContainerBuilder()
+    .setAccentColor(COLORS.INFO)
+    .addTextDisplayComponents(
+      new TextDisplayBuilder().setContent(
+        `## 💜 One Quick Step\n${message}\n\nJoin with the button below, then press **I’ve Joined — Continue**. Bozos will continue the same `/join` automatically.`
+      )
+    )
+    .addActionRowComponents(
+      new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setLabel("Join Support Server")
+          .setEmoji("💬")
+          .setStyle(ButtonStyle.Link)
+          .setURL(SUPPORT_SERVER_URL),
+        new ButtonBuilder()
+          .setCustomId(`support_join_continue:${userId}`)
+          .setLabel("I've Joined — Continue")
+          .setEmoji("✅")
+          .setStyle(ButtonStyle.Success)
+      )
+    );
+}
+
+async function showSupportMembershipGate(interaction, stillMissing = false) {
+  const container = buildSupportMembershipGate(interaction.user.id, stillMissing);
+
+  if (interaction.replied || interaction.deferred) {
+    return interaction.editReply({ components: [container] });
+  }
+
+  return interaction.reply({
+    components: [container],
+    flags: MessageFlags.IsComponentsV2 | MessageFlags.Ephemeral,
+  });
+}
+
+async function handleJoinInteraction(interaction) {
+  const voiceError = requireJoinVoiceChannel(interaction);
+  if (voiceError) {
+    return replyWithV2(interaction, {
+      title: "Voice Channel Required",
+      description: voiceError,
+      color: COLORS.ERROR,
+      ephemeral: true,
+    });
+  }
+
+  const voiceChannel = interaction.member?.voice?.channel;
+  if (!voiceChannel) {
+    return replyWithV2(interaction, {
+      title: "Voice Channel Required",
+      description: "Join a voice channel first, then run `/join` again.",
+      color: COLORS.ERROR,
+      ephemeral: true,
+    });
+  }
+
+  const membershipStatus = await getSupportMembershipStatus(interaction.user.id);
+  if (membershipStatus === "not_member") {
+    return showSupportMembershipGate(interaction, interaction.deferred);
+  }
+
+  // A transient Discord/support-guild lookup problem should never take the TTS
+  // service down. The rule is enforced whenever Discord can answer the lookup;
+  // only verification outages fail open to preserve user experience.
+  if (membershipStatus === "unavailable") {
+    console.warn(
+      `[Support Gate] Verification unavailable for ${interaction.user.id}; allowing /join to avoid a service-impacting false block.`
+    );
+  }
+
+  const permissions = voiceChannel.permissionsFor(interaction.guild.members.me);
+
+  if (
+    !permissions?.has(PermissionFlagsBits.ViewChannel) ||
+    !permissions?.has(PermissionFlagsBits.Connect) ||
+    !permissions?.has(PermissionFlagsBits.Speak)
+  ) {
+    return replyWithV2(interaction, {
+      title: "Missing Permissions",
+      description:
+        `I need these permissions in <#${voiceChannel.id}>:\n\n` +
+        "• **View Channel**\n" +
+        "• **Connect**\n" +
+        "• **Speak**",
+      color: COLORS.ERROR,
+      ephemeral: true,
+    });
+  }
+
+  const existingConnection = getVoiceConnection(interaction.guildId);
+  const existingState = guildStates.get(interaction.guildId);
+  const connectedChannelId =
+    existingConnection?.joinConfig?.channelId || existingState?.voiceChannelId || null;
+
+  if (existingConnection && connectedChannelId === voiceChannel.id) {
+    if (existingState) clearEmptyChannelTimer(existingState);
+
+    return replyWithV2(interaction, {
+      title: "Already Connected",
+      description:
+        `I am already connected to <#${voiceChannel.id}>.\n\n` +
+        "Messages posted in this voice channel's chat will continue to be spoken aloud.",
+      color: COLORS.WARNING,
+    });
+  }
+
+  await replyWithV2(interaction, {
+    title: "Connecting",
+    description: `Joining <#${voiceChannel.id}> and preparing voice-chat TTS...`,
+    color: COLORS.INFO,
+  });
+
+  try {
+    const previousState = guildStates.get(interaction.guildId);
+
+    if (
+      previousState?.voiceChannelId &&
+      previousState.voiceChannelId !== voiceChannel.id
+    ) {
+      previousState.queue.length = 0;
+      try {
+        previousState.player.stop(true);
+      } catch {
+        // Player may already be idle.
+      }
+    }
+
+    const state = getGuildState(interaction.guildId);
+    await connectToVoiceChannel(voiceChannel, state);
+    clearEmptyChannelTimer(state);
+    await playJoinSound(interaction.guildId, state);
+
+    const successContainer = new ContainerBuilder()
+      .setAccentColor(COLORS.SUCCESS)
+      .addTextDisplayComponents((textDisplay) =>
+        textDisplay.setContent(
+          [
+            "## 🔊 Voice Chat Connected",
+            `Successfully connected to <#${voiceChannel.id}>.`,
+          ].join("\n")
+        )
+      )
+      .addSeparatorComponents((separator) => separator.setDivider(true))
+      .addTextDisplayComponents((textDisplay) =>
+        textDisplay.setContent(
+          [
+            "### How it works",
+            "Messages posted in this voice channel's built-in chat will now be spoken aloud.",
+          ].join("\n")
+        )
+      );
+
+    await interaction.editReply({ components: [successContainer] });
+  } catch (error) {
+    console.error("Failed to join voice channel:", error);
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    const errorContainer = createV2Container({
+      title: "Connection Failed",
+      description:
+        `I could not join <#${voiceChannel.id}>.\n\n` +
+        `**Reason:** ${errorMessage}`,
+      color: COLORS.ERROR,
+    });
+    await interaction.editReply({ components: [errorContainer] });
+  }
+}
+
+
 client.on(
   Events.InteractionCreate,
   async (interaction) => {
+    // Seamless support-server membership gate for /join. The button belongs only
+    // to the user who originally ran /join and continues the same command flow.
+    if (interaction.isButton() && interaction.customId.startsWith("support_join_continue:")) {
+      const expectedUserId = interaction.customId.split(":")[1] || "";
+      if (interaction.user.id !== expectedUserId) {
+        return interaction.reply({
+          content: "This verification button belongs to the person who ran `/join`.",
+          flags: MessageFlags.Ephemeral,
+        });
+      }
+
+      if (!interaction.inGuild()) {
+        return interaction.reply({
+          content: "This button can only be used inside a server.",
+          flags: MessageFlags.Ephemeral,
+        });
+      }
+
+      await interaction.deferUpdate();
+      return handleJoinInteraction(interaction);
+    }
+
     // Handle Pagination Buttons for /language menu
     if (interaction.isButton() && interaction.customId.startsWith("lang_page_")) {
       const voiceError = requireSameVoiceChannel(interaction);
@@ -4933,228 +5205,8 @@ client.on(
        /JOIN
     ----------------------------------------------------- */
 
-    if (
-      interaction.commandName ===
-      "join"
-    ) {
-      const voiceError = requireJoinVoiceChannel(interaction);
-      if (voiceError) return replyWithV2(interaction, { title: "Voice Channel Required", description: voiceError, color: COLORS.ERROR, ephemeral: true });
-      const voiceChannel =
-        interaction.member
-          ?.voice
-          ?.channel;
-
-      if (!voiceChannel) {
-        return replyWithV2(
-          interaction,
-          {
-            title:
-              "Voice Channel Required",
-            description:
-              "Join a voice channel first, then run `/join` again.",
-            color: COLORS.ERROR,
-            ephemeral: true,
-          }
-        );
-      }
-
-      const permissions =
-        voiceChannel.permissionsFor(
-          interaction.guild.members.me
-        );
-
-      if (
-        !permissions?.has(
-          PermissionFlagsBits.ViewChannel
-        ) ||
-        !permissions?.has(
-          PermissionFlagsBits.Connect
-        ) ||
-        !permissions?.has(
-          PermissionFlagsBits.Speak
-        )
-      ) {
-        return replyWithV2(
-          interaction,
-          {
-            title:
-              "Missing Permissions",
-
-            description:
-              `I need these permissions in <#${voiceChannel.id}>:\n\n` +
-              "• **View Channel**\n" +
-              "• **Connect**\n" +
-              "• **Speak**",
-
-            color: COLORS.ERROR,
-            ephemeral: true,
-          }
-        );
-      }
-
-      const existingConnection =
-        getVoiceConnection(
-          interaction.guildId
-        );
-
-      const existingState =
-        guildStates.get(
-          interaction.guildId
-        );
-
-      const connectedChannelId =
-        existingConnection
-          ?.joinConfig
-          ?.channelId ||
-        existingState
-          ?.voiceChannelId ||
-        null;
-
-      if (
-        existingConnection &&
-        connectedChannelId ===
-          voiceChannel.id
-      ) {
-        if (existingState) {
-          clearEmptyChannelTimer(
-            existingState
-          );
-        }
-
-        return replyWithV2(
-          interaction,
-          {
-            title:
-              "Already Connected",
-
-            description:
-              `I am already connected to <#${voiceChannel.id}>.\n\n` +
-              "Messages posted in this voice channel's chat will continue to be spoken aloud.",
-
-            color: COLORS.WARNING,
-          }
-        );
-      }
-
-      await replyWithV2(
-        interaction,
-        {
-          title: "Connecting",
-          description:
-            `Joining <#${voiceChannel.id}> and preparing voice-chat TTS...`,
-          color: COLORS.INFO,
-        }
-      );
-
-      try {
-        const previousState =
-          guildStates.get(
-            interaction.guildId
-          );
-
-        if (
-          previousState
-            ?.voiceChannelId &&
-          previousState
-            .voiceChannelId !==
-            voiceChannel.id
-        ) {
-          previousState.queue.length = 0;
-
-          try {
-            previousState.player.stop(
-              true
-            );
-          } catch {
-            // Player may already be idle.
-          }
-        }
-
-        const state =
-          getGuildState(
-            interaction.guildId
-          );
-
-        await connectToVoiceChannel(
-          voiceChannel,
-          state
-        );
-
-        clearEmptyChannelTimer(
-          state
-        );
-
-        await playJoinSound(interaction.guildId, state);
-
-        const successContainer =
-          new ContainerBuilder()
-            .setAccentColor(
-              COLORS.SUCCESS
-            )
-
-            .addTextDisplayComponents(
-              (textDisplay) =>
-                textDisplay.setContent(
-                  [
-                    "## 🔊 Voice Chat Connected",
-                    `Successfully connected to <#${voiceChannel.id}>.`,
-                  ].join("\n")
-                )
-            )
-
-            .addSeparatorComponents(
-              (separator) =>
-                separator.setDivider(
-                  true
-                )
-            )
-
-            .addTextDisplayComponents(
-              (textDisplay) =>
-                textDisplay.setContent(
-                  [
-                    "### How it works",
-                    "Messages posted in this voice channel's built-in chat will now be spoken aloud.",
-                  ].join("\n")
-                )
-            );
-
-        await interaction.editReply({
-          components: [
-            successContainer,
-          ],
-        });
-      } catch (error) {
-        console.error(
-          "Failed to join voice channel:",
-          error
-        );
-
-        const errorMessage =
-          error instanceof Error
-            ? error.message
-            : String(error);
-
-        const errorContainer =
-          createV2Container({
-            title:
-              "Connection Failed",
-
-            description:
-              `I could not join <#${voiceChannel.id}>.\n\n` +
-              `**Reason:** ${errorMessage}`,
-
-            color: COLORS.ERROR,
-          });
-
-        await interaction.editReply({
-          components: [
-            errorContainer,
-          ],
-        });
-      }
-
-      return;
+    if (interaction.commandName === "join") {
+      return handleJoinInteraction(interaction);
     }
 
 
