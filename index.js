@@ -4823,7 +4823,7 @@ function buildSupportMembershipGate(userId, stillMissing = false) {
     .setAccentColor(COLORS.INFO)
     .addTextDisplayComponents(
       new TextDisplayBuilder().setContent(
-        `## 💜 One Quick Step\n${message}\n\nJoin with the button below, then press **I’ve Joined — Continue**. Bozos will continue the same `/join` automatically.`
+        `## 💜 One Quick Step\n${message}\n\nJoin with the button below, then press **I’ve Joined — Continue**. Bozos will continue the same \`/join\` automatically.`
       )
     )
     .addActionRowComponents(
