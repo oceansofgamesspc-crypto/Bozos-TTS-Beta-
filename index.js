@@ -44,12 +44,8 @@ const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 
 const TTS_CHUNK_TARGET_CHARS = 360;
 const TTS_CHUNK_MAX_CHARS = 480;
-const EDGE_VOICE_REFRESH_MS = 24 * 60 * 60 * 1000;
-const EDGE_VOICE_VALIDATION_TIMEOUT_MS = 8_000;
-const EDGE_VOICE_GLOBAL_VERIFY_CONCURRENCY = 6;
-const EDGE_VOICE_VERIFY_MIN_START_GAP_MS = 100;
 const EMPTY_CHANNEL_LEAVE_DELAY_MS = 180_000;
-const SPEAKER_REPEAT_WINDOW_MS = 8_000;
+const SPEAKER_REPEAT_WINDOW_MS = 15_000;
 const MAX_JOB_RETRIES = 3;
 const RETRY_DELAY_MS = 750;
 const MAX_VOLUME = 2.0;
@@ -98,709 +94,2269 @@ function createSafeMsEdgeTTS() {
 }
 
 
-const VOICE_ACCENTS = {
-  english: {
-    default: "en-US-JennyNeural",
-    us: "en-US-JennyNeural",
-    uk: "en-GB-LibbyNeural",
-    au: "en-AU-NatashaNeural",
-    in: "en-IN-NeerjaNeural",
-    ca: "en-CA-ClaraNeural",
-  },
-  spanish: {
-    default: "es-ES-ElviraNeural",
-    es: "es-ES-ElviraNeural",
-    mx: "es-MX-DaliaNeural",
-    us: "es-US-PalomaNeural",
-  },
-  portuguese: {
-    default: "pt-BR-FranciscaNeural",
-    br: "pt-BR-FranciscaNeural",
-    pt: "pt-PT-RaquelNeural",
-  },
-  french: {
-    default: "fr-FR-DeniseNeural",
-    fr: "fr-FR-DeniseNeural",
-    ca: "fr-CA-SylvieNeural",
-  },
-  german: {
-    default: "de-DE-KatjaNeural",
-    de: "de-DE-KatjaNeural",
-    at: "de-AT-IngridNeural",
-    ch: "de-CH-LeniNeural",
-  },
-  chinese: {
-    default: "zh-CN-XiaoxiaoNeural",
-    cn: "zh-CN-XiaoxiaoNeural",
-    tw: "zh-TW-HsiaoChenNeural",
-  },
-  arabic: {
-    default: "ar-SA-ZariyahNeural",
-    sa: "ar-SA-ZariyahNeural",
-    ae: "ar-AE-FatimaNeural",
-    eg: "ar-EG-SalmaNeural",
-  },
-  hindi: { default: "hi-IN-SwaraNeural", in: "hi-IN-SwaraNeural" },
-  bengali: { default: "bn-IN-TanishaaNeural", in: "bn-IN-TanishaaNeural" },
-  tamil: { default: "ta-IN-PallaviNeural", in: "ta-IN-PallaviNeural" },
-  telugu: { default: "te-IN-ShrutiNeural", in: "te-IN-ShrutiNeural" },
-  marathi: { default: "mr-IN-AarohiNeural", in: "mr-IN-AarohiNeural" },
-  gujarati: { default: "gu-IN-DhwaniNeural", in: "gu-IN-DhwaniNeural" },
-  kannada: { default: "kn-IN-SapnaNeural", in: "kn-IN-SapnaNeural" },
-  malayalam: { default: "ml-IN-SobhanaNeural", in: "ml-IN-SobhanaNeural" },
-};
+// Permanent production voice catalog.
+//
+// Everything lives directly in index.js again. For every locale that existed
+// in the earlier conservative two-voice catalog, those original two models
+// remain first and in their original order; all additional production-verified
+// voices are appended after them. New locales use the verified snapshot order.
+//
+// Voices remain categorized by supported language -> exact locale/accent.
+// Production performs no voice discovery or verification requests.
+const VERIFIED_VOICE_SNAPSHOT = Object.freeze({
+  "verifiedAt": "2026-08-25T12:12:03.387Z",
+  "verifiedVoices": 323,
+  "locales": 142,
+  "languageFamilies": 75,
+  "excludedVoices": [
+    {
+      "voice": "yo-NG-AbebiNeural",
+      "locale": "yo-NG",
+      "gender": "Female"
+    },
+    {
+      "voice": "yo-NG-AbeoNeural",
+      "locale": "yo-NG",
+      "gender": "Male"
+    }
+  ]
+});
 
-// Conservative Edge TTS voice list.
-// Keep only long-standing voices exposed by the Edge consumer TTS service;
-// newer Azure-only/less-consistent models are intentionally not shown in /voice.
-const VOICE_MODELS_BY_LOCALE = {
-  "af-ZA": [
-    { voice: "af-ZA-AdriNeural", gender: "Female" },
-    { voice: "af-ZA-WillemNeural", gender: "Male" },
-  ],
-  "am-ET": [
-    { voice: "am-ET-MekdesNeural", gender: "Female" },
-    { voice: "am-ET-AmehaNeural", gender: "Male" },
-  ],
-  "ar-AE": [
-    { voice: "ar-AE-FatimaNeural", gender: "Female" },
-    { voice: "ar-AE-HamdanNeural", gender: "Male" },
-  ],
-  "ar-EG": [
-    { voice: "ar-EG-SalmaNeural", gender: "Female" },
-    { voice: "ar-EG-ShakirNeural", gender: "Male" },
-  ],
-  "ar-SA": [
-    { voice: "ar-SA-ZariyahNeural", gender: "Female" },
-    { voice: "ar-SA-HamedNeural", gender: "Male" },
-  ],
-  "bg-BG": [
-    { voice: "bg-BG-KalinaNeural", gender: "Female" },
-    { voice: "bg-BG-BorislavNeural", gender: "Male" },
-  ],
-  "bn-IN": [
-    { voice: "bn-IN-TanishaaNeural", gender: "Female" },
-    { voice: "bn-IN-BashkarNeural", gender: "Male" },
-  ],
-  "ca-ES": [
-    { voice: "ca-ES-JoanaNeural", gender: "Female" },
-    { voice: "ca-ES-EnricNeural", gender: "Male" },
-  ],
-  "cs-CZ": [
-    { voice: "cs-CZ-VlastaNeural", gender: "Female" },
-    { voice: "cs-CZ-AntoninNeural", gender: "Male" },
-  ],
-  "cy-GB": [
-    { voice: "cy-GB-NiaNeural", gender: "Female" },
-    { voice: "cy-GB-AledNeural", gender: "Male" },
-  ],
-  "da-DK": [
-    { voice: "da-DK-ChristelNeural", gender: "Female" },
-    { voice: "da-DK-JeppeNeural", gender: "Male" },
-  ],
-  "de-AT": [
-    { voice: "de-AT-IngridNeural", gender: "Female" },
-    { voice: "de-AT-JonasNeural", gender: "Male" },
-  ],
-  "de-CH": [
-    { voice: "de-CH-LeniNeural", gender: "Female" },
-    { voice: "de-CH-JanNeural", gender: "Male" },
-  ],
-  "de-DE": [
-    { voice: "de-DE-KatjaNeural", gender: "Female" },
-    { voice: "de-DE-ConradNeural", gender: "Male" },
-  ],
-  "el-GR": [
-    { voice: "el-GR-AthinaNeural", gender: "Female" },
-    { voice: "el-GR-NestorasNeural", gender: "Male" },
-  ],
-  "en-AU": [
-    { voice: "en-AU-NatashaNeural", gender: "Female" },
-    { voice: "en-AU-WilliamNeural", gender: "Male" },
-  ],
-  "en-CA": [
-    { voice: "en-CA-ClaraNeural", gender: "Female" },
-    { voice: "en-CA-LiamNeural", gender: "Male" },
-  ],
-  "en-GB": [
-    { voice: "en-GB-LibbyNeural", gender: "Female" },
-    { voice: "en-GB-RyanNeural", gender: "Male" },
-  ],
-  "en-IN": [
-    { voice: "en-IN-NeerjaNeural", gender: "Female" },
-    { voice: "en-IN-PrabhatNeural", gender: "Male" },
-  ],
-  "en-US": [
-    { voice: "en-US-JennyNeural", gender: "Female" },
-    { voice: "en-US-GuyNeural", gender: "Male" },
-  ],
-  "es-ES": [
-    { voice: "es-ES-ElviraNeural", gender: "Female" },
-    { voice: "es-ES-AlvaroNeural", gender: "Male" },
-  ],
-  "es-MX": [
-    { voice: "es-MX-DaliaNeural", gender: "Female" },
-    { voice: "es-MX-JorgeNeural", gender: "Male" },
-  ],
-  "es-US": [
-    { voice: "es-US-PalomaNeural", gender: "Female" },
-    { voice: "es-US-AlonsoNeural", gender: "Male" },
-  ],
-  "et-EE": [
-    { voice: "et-EE-AnuNeural", gender: "Female" },
-    { voice: "et-EE-KertNeural", gender: "Male" },
-  ],
-  "fa-IR": [
-    { voice: "fa-IR-DilaraNeural", gender: "Female" },
-    { voice: "fa-IR-FaridNeural", gender: "Male" },
-  ],
-  "fi-FI": [
-    { voice: "fi-FI-NooraNeural", gender: "Female" },
-    { voice: "fi-FI-HarriNeural", gender: "Male" },
-  ],
-  "fil-PH": [
-    { voice: "fil-PH-BlessicaNeural", gender: "Female" },
-    { voice: "fil-PH-AngeloNeural", gender: "Male" },
-  ],
-  "fr-CA": [
-    { voice: "fr-CA-SylvieNeural", gender: "Female" },
-    { voice: "fr-CA-JeanNeural", gender: "Male" },
-  ],
-  "fr-FR": [
-    { voice: "fr-FR-DeniseNeural", gender: "Female" },
-    { voice: "fr-FR-HenriNeural", gender: "Male" },
-  ],
-  "ga-IE": [
-    { voice: "ga-IE-OrlaNeural", gender: "Female" },
-    { voice: "ga-IE-ColmNeural", gender: "Male" },
-  ],
-  "gu-IN": [
-    { voice: "gu-IN-DhwaniNeural", gender: "Female" },
-    { voice: "gu-IN-NiranjanNeural", gender: "Male" },
-  ],
-  "he-IL": [
-    { voice: "he-IL-HilaNeural", gender: "Female" },
-    { voice: "he-IL-AvriNeural", gender: "Male" },
-  ],
-  "hi-IN": [
-    { voice: "hi-IN-SwaraNeural", gender: "Female" },
-    { voice: "hi-IN-MadhurNeural", gender: "Male" },
-  ],
-  "hr-HR": [
-    { voice: "hr-HR-GabrijelaNeural", gender: "Female" },
-    { voice: "hr-HR-SreckoNeural", gender: "Male" },
-  ],
-  "hu-HU": [
-    { voice: "hu-HU-NoemiNeural", gender: "Female" },
-    { voice: "hu-HU-TamasNeural", gender: "Male" },
-  ],
-  "id-ID": [
-    { voice: "id-ID-GadisNeural", gender: "Female" },
-    { voice: "id-ID-ArdiNeural", gender: "Male" },
-  ],
-  "it-IT": [
-    { voice: "it-IT-ElsaNeural", gender: "Female" },
-    { voice: "it-IT-DiegoNeural", gender: "Male" },
-  ],
-  "ja-JP": [
-    { voice: "ja-JP-NanamiNeural", gender: "Female" },
-    { voice: "ja-JP-KeitaNeural", gender: "Male" },
-  ],
-  "kn-IN": [
-    { voice: "kn-IN-SapnaNeural", gender: "Female" },
-    { voice: "kn-IN-GaganNeural", gender: "Male" },
-  ],
-  "ko-KR": [
-    { voice: "ko-KR-SunHiNeural", gender: "Female" },
-    { voice: "ko-KR-InJoonNeural", gender: "Male" },
-  ],
-  "lt-LT": [
-    { voice: "lt-LT-OnaNeural", gender: "Female" },
-    { voice: "lt-LT-LeonasNeural", gender: "Male" },
-  ],
-  "lv-LV": [
-    { voice: "lv-LV-EveritaNeural", gender: "Female" },
-    { voice: "lv-LV-NilsNeural", gender: "Male" },
-  ],
-  "ml-IN": [
-    { voice: "ml-IN-SobhanaNeural", gender: "Female" },
-    { voice: "ml-IN-MidhunNeural", gender: "Male" },
-  ],
-  "mr-IN": [
-    { voice: "mr-IN-AarohiNeural", gender: "Female" },
-    { voice: "mr-IN-ManoharNeural", gender: "Male" },
-  ],
-  "ms-MY": [
-    { voice: "ms-MY-YasminNeural", gender: "Female" },
-    { voice: "ms-MY-OsmanNeural", gender: "Male" },
-  ],
-  "nb-NO": [
-    { voice: "nb-NO-PernilleNeural", gender: "Female" },
-    { voice: "nb-NO-FinnNeural", gender: "Male" },
-  ],
-  "nl-NL": [
-    { voice: "nl-NL-FennaNeural", gender: "Female" },
-    { voice: "nl-NL-MaartenNeural", gender: "Male" },
-  ],
-  "pl-PL": [
-    { voice: "pl-PL-ZofiaNeural", gender: "Female" },
-    { voice: "pl-PL-MarekNeural", gender: "Male" },
-  ],
-  "pt-BR": [
-    { voice: "pt-BR-FranciscaNeural", gender: "Female" },
-    { voice: "pt-BR-AntonioNeural", gender: "Male" },
-  ],
-  "pt-PT": [
-    { voice: "pt-PT-RaquelNeural", gender: "Female" },
-    { voice: "pt-PT-DuarteNeural", gender: "Male" },
-  ],
-  "ro-RO": [
-    { voice: "ro-RO-AlinaNeural", gender: "Female" },
-    { voice: "ro-RO-EmilNeural", gender: "Male" },
-  ],
-  "ru-RU": [
-    { voice: "ru-RU-SvetlanaNeural", gender: "Female" },
-    { voice: "ru-RU-DmitryNeural", gender: "Male" },
-  ],
-  "sk-SK": [
-    { voice: "sk-SK-ViktoriaNeural", gender: "Female" },
-    { voice: "sk-SK-LukasNeural", gender: "Male" },
-  ],
-  "sl-SI": [
-    { voice: "sl-SI-PetraNeural", gender: "Female" },
-    { voice: "sl-SI-RokNeural", gender: "Male" },
-  ],
-  "sr-RS": [
-    { voice: "sr-RS-SophieNeural", gender: "Female" },
-    { voice: "sr-RS-NicholasNeural", gender: "Male" },
-  ],
-  "sv-SE": [
-    { voice: "sv-SE-SofieNeural", gender: "Female" },
-    { voice: "sv-SE-MattiasNeural", gender: "Male" },
-  ],
-  "sw-KE": [
-    { voice: "sw-KE-ZuriNeural", gender: "Female" },
-    { voice: "sw-KE-RafikiNeural", gender: "Male" },
-  ],
-  "ta-IN": [
-    { voice: "ta-IN-PallaviNeural", gender: "Female" },
-    { voice: "ta-IN-ValluvarNeural", gender: "Male" },
-  ],
-  "te-IN": [
-    { voice: "te-IN-ShrutiNeural", gender: "Female" },
-    { voice: "te-IN-MohanNeural", gender: "Male" },
-  ],
-  "th-TH": [
-    { voice: "th-TH-PremwadeeNeural", gender: "Female" },
-    { voice: "th-TH-NiwatNeural", gender: "Male" },
-  ],
-  "tr-TR": [
-    { voice: "tr-TR-EmelNeural", gender: "Female" },
-    { voice: "tr-TR-AhmetNeural", gender: "Male" },
-  ],
-  "uk-UA": [
-    { voice: "uk-UA-PolinaNeural", gender: "Female" },
-    { voice: "uk-UA-OstapNeural", gender: "Male" },
-  ],
-  "ur-PK": [
-    { voice: "ur-PK-UzmaNeural", gender: "Female" },
-    { voice: "ur-PK-AsadNeural", gender: "Male" },
-  ],
-  "vi-VN": [
-    { voice: "vi-VN-HoaiMyNeural", gender: "Female" },
-    { voice: "vi-VN-NamMinhNeural", gender: "Male" },
-  ],
-  "yo-NG": [
-    { voice: "yo-NG-AbebiNeural", gender: "Female" },
-    { voice: "yo-NG-AbeoNeural", gender: "Male" },
-  ],
-  "zh-CN": [
-    { voice: "zh-CN-XiaoxiaoNeural", gender: "Female" },
-    { voice: "zh-CN-YunxiNeural", gender: "Male" },
-  ],
-  "zh-TW": [
-    { voice: "zh-TW-HsiaoChenNeural", gender: "Female" },
-    { voice: "zh-TW-YunJheNeural", gender: "Male" },
-  ],
-  "zu-ZA": [
-    { voice: "zu-ZA-ThandoNeural", gender: "Female" },
-    { voice: "zu-ZA-ThembaNeural", gender: "Male" },
-  ],
-};
-
-// Live Edge voice catalog. The hardcoded table above is retained only as a
-// boot/offline fallback. /voice shows only voices that have recently passed
-// a real Edge synthesis test; the live advertised catalog is merely the candidate pool.
-let liveEdgeVoicesByLocale = new Map();
-const unhealthyEdgeVoices = new Map();
-const verifiedEdgeVoices = new Map();
-const voiceVerificationInFlight = new Map();
-let activeVoiceVerifications = 0;
-const voiceVerificationSlotWaiters = [];
-let lastVoiceVerificationStartedAt = 0;
-let edgeVoiceCatalogRefreshInFlight = null;
-let edgeVoiceCatalogUpdatedAt = 0;
-let startupVoiceVerificationInFlight = null;
-let startupVoiceVerificationCompletedAt = 0;
-
-function isTemporarilyUnhealthyVoice(voice) {
-  const until = unhealthyEdgeVoices.get(voice) || 0;
-  if (!until) return false;
-  if (Date.now() >= until) {
-    unhealthyEdgeVoices.delete(voice);
-    return false;
-  }
-  return true;
-}
-
-function isRecentlyVerifiedVoice(voice) {
-  return Boolean(voice && verifiedEdgeVoices.has(voice) && !isTemporarilyUnhealthyVoice(voice));
-}
-
-function markVoiceVerified(voice, verifiedAt = Date.now()) {
-  if (!voice) return;
-  unhealthyEdgeVoices.delete(voice);
-  verifiedEdgeVoices.set(voice, verifiedAt);
-}
-
-function markVoiceUnhealthy(voice, ttlMs = Infinity) {
-  if (!voice) return;
-  verifiedEdgeVoices.delete(voice);
-  unhealthyEdgeVoices.set(voice, ttlMs === Infinity ? Infinity : Date.now() + ttlMs);
-}
-
-async function acquireVoiceVerificationSlot() {
-  if (activeVoiceVerifications >= EDGE_VOICE_GLOBAL_VERIFY_CONCURRENCY) {
-    await new Promise((resolve) => voiceVerificationSlotWaiters.push(resolve));
-  }
-
-  activeVoiceVerifications += 1;
-  const waitMs = Math.max(0, EDGE_VOICE_VERIFY_MIN_START_GAP_MS - (Date.now() - lastVoiceVerificationStartedAt));
-  if (waitMs) await wait(waitMs);
-  lastVoiceVerificationStartedAt = Date.now();
-}
-
-function releaseVoiceVerificationSlot() {
-  activeVoiceVerifications = Math.max(0, activeVoiceVerifications - 1);
-  const next = voiceVerificationSlotWaiters.shift();
-  if (next) next();
-}
-
-async function withVoiceVerificationSlot(worker) {
-  await acquireVoiceVerificationSlot();
-  try {
-    return await worker();
-  } finally {
-    releaseVoiceVerificationSlot();
-  }
-}
-
-function normalizeEdgeVoiceRecord(raw) {
-  const voice = raw?.ShortName || raw?.shortName || raw?.Name || raw?.name || "";
-  const locale = raw?.Locale || raw?.locale || getVoiceLocale(voice);
-  const genderRaw = String(raw?.Gender || raw?.gender || "Neural");
-  const gender = /^female$/i.test(genderRaw) ? "Female" : /^male$/i.test(genderRaw) ? "Male" : "Neural";
-  const tags = raw?.VoiceTag || raw?.voiceTag || {};
-  const personalities = Array.isArray(tags?.VoicePersonalities)
-    ? tags.VoicePersonalities
-    : Array.isArray(tags?.voicePersonalities) ? tags.voicePersonalities : [];
-  const categories = Array.isArray(tags?.ContentCategories)
-    ? tags.ContentCategories
-    : Array.isArray(tags?.contentCategories) ? tags.contentCategories : [];
-  return { voice, locale, gender, personalities, categories };
-}
-
-async function refreshEdgeVoiceCatalog({ force = false } = {}) {
-  if (!force && edgeVoiceCatalogUpdatedAt && Date.now() - edgeVoiceCatalogUpdatedAt < EDGE_VOICE_REFRESH_MS) {
-    return liveEdgeVoicesByLocale;
-  }
-
-  // One shared catalog request per process. A burst of /voice commands cannot
-  // fan out into many simultaneous Edge getVoices() calls.
-  if (edgeVoiceCatalogRefreshInFlight) return edgeVoiceCatalogRefreshInFlight;
-
-  edgeVoiceCatalogRefreshInFlight = (async () => {
-    const edge = createSafeMsEdgeTTS();
-    try {
-      const advertised = await edge.getVoices();
-      const next = new Map();
-
-      for (const raw of Array.isArray(advertised) ? advertised : []) {
-        const entry = normalizeEdgeVoiceRecord(raw);
-        if (!entry.voice || !entry.locale || !/Neural$/i.test(entry.voice)) continue;
-        if (!next.has(entry.locale)) next.set(entry.locale, []);
-        if (!next.get(entry.locale).some((item) => item.voice === entry.voice)) {
-          next.get(entry.locale).push(entry);
+const VERIFIED_VOICES_BY_LANGUAGE = {
+  "afrikaans": {
+    "code": "af",
+    "label": "Afrikaans",
+    "defaultLocale": "af-ZA",
+    "defaultVoice": "af-ZA-AdriNeural",
+    "locales": {
+      "af-ZA": [
+        {
+          "voice": "af-ZA-AdriNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "af-ZA-WillemNeural",
+          "gender": "Male"
         }
-      }
-
-      for (const entries of next.values()) {
-        entries.sort((a, b) => {
-          if (a.gender !== b.gender) return a.gender === "Female" ? -1 : b.gender === "Female" ? 1 : 0;
-          return getVoicePersonaName(a.voice).localeCompare(getVoicePersonaName(b.voice));
-        });
-      }
-
-      if (next.size) {
-        liveEdgeVoicesByLocale = next;
-        edgeVoiceCatalogUpdatedAt = Date.now();
-        const total = [...next.values()].reduce((sum, list) => sum + list.length, 0);
-        console.log(`[Voice Catalog] Loaded ${total} currently advertised Edge neural voices across ${next.size} locales.`);
-        // Synthesis verification is handled only by the one startup sweep.
-        // /voice never triggers Edge requests.
-      }
-    } catch (error) {
-      console.warn('[Voice Catalog] Live refresh failed; keeping safe fallback catalog:', error?.message || error);
-    } finally {
-      try { edge.close(); } catch {}
+      ]
     }
+  },
+  "albanian": {
+    "code": "sq",
+    "label": "Albanian",
+    "defaultLocale": "sq-AL",
+    "defaultVoice": "sq-AL-AnilaNeural",
+    "locales": {
+      "sq-AL": [
+        {
+          "voice": "sq-AL-AnilaNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "sq-AL-IlirNeural",
+          "gender": "Male"
+        }
+      ]
+    }
+  },
+  "amharic": {
+    "code": "am",
+    "label": "Amharic",
+    "defaultLocale": "am-ET",
+    "defaultVoice": "am-ET-MekdesNeural",
+    "locales": {
+      "am-ET": [
+        {
+          "voice": "am-ET-MekdesNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "am-ET-AmehaNeural",
+          "gender": "Male"
+        }
+      ]
+    }
+  },
+  "arabic": {
+    "code": "ar",
+    "label": "Arabic",
+    "defaultLocale": "ar-SA",
+    "defaultVoice": "ar-SA-ZariyahNeural",
+    "locales": {
+      "ar-AE": [
+        {
+          "voice": "ar-AE-FatimaNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "ar-AE-HamdanNeural",
+          "gender": "Male"
+        }
+      ],
+      "ar-BH": [
+        {
+          "voice": "ar-BH-LailaNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "ar-BH-AliNeural",
+          "gender": "Male"
+        }
+      ],
+      "ar-DZ": [
+        {
+          "voice": "ar-DZ-AminaNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "ar-DZ-IsmaelNeural",
+          "gender": "Male"
+        }
+      ],
+      "ar-EG": [
+        {
+          "voice": "ar-EG-SalmaNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "ar-EG-ShakirNeural",
+          "gender": "Male"
+        }
+      ],
+      "ar-IQ": [
+        {
+          "voice": "ar-IQ-RanaNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "ar-IQ-BasselNeural",
+          "gender": "Male"
+        }
+      ],
+      "ar-JO": [
+        {
+          "voice": "ar-JO-SanaNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "ar-JO-TaimNeural",
+          "gender": "Male"
+        }
+      ],
+      "ar-KW": [
+        {
+          "voice": "ar-KW-NouraNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "ar-KW-FahedNeural",
+          "gender": "Male"
+        }
+      ],
+      "ar-LB": [
+        {
+          "voice": "ar-LB-LaylaNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "ar-LB-RamiNeural",
+          "gender": "Male"
+        }
+      ],
+      "ar-LY": [
+        {
+          "voice": "ar-LY-ImanNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "ar-LY-OmarNeural",
+          "gender": "Male"
+        }
+      ],
+      "ar-MA": [
+        {
+          "voice": "ar-MA-MounaNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "ar-MA-JamalNeural",
+          "gender": "Male"
+        }
+      ],
+      "ar-OM": [
+        {
+          "voice": "ar-OM-AyshaNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "ar-OM-AbdullahNeural",
+          "gender": "Male"
+        }
+      ],
+      "ar-QA": [
+        {
+          "voice": "ar-QA-AmalNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "ar-QA-MoazNeural",
+          "gender": "Male"
+        }
+      ],
+      "ar-SA": [
+        {
+          "voice": "ar-SA-ZariyahNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "ar-SA-HamedNeural",
+          "gender": "Male"
+        }
+      ],
+      "ar-SY": [
+        {
+          "voice": "ar-SY-AmanyNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "ar-SY-LaithNeural",
+          "gender": "Male"
+        }
+      ],
+      "ar-TN": [
+        {
+          "voice": "ar-TN-ReemNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "ar-TN-HediNeural",
+          "gender": "Male"
+        }
+      ],
+      "ar-YE": [
+        {
+          "voice": "ar-YE-MaryamNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "ar-YE-SalehNeural",
+          "gender": "Male"
+        }
+      ]
+    }
+  },
+  "azerbaijani": {
+    "code": "az",
+    "label": "Azerbaijani",
+    "defaultLocale": "az-AZ",
+    "defaultVoice": "az-AZ-BanuNeural",
+    "locales": {
+      "az-AZ": [
+        {
+          "voice": "az-AZ-BanuNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "az-AZ-BabekNeural",
+          "gender": "Male"
+        }
+      ]
+    }
+  },
+  "bengali": {
+    "code": "bn",
+    "label": "Bengali",
+    "defaultLocale": "bn-IN",
+    "defaultVoice": "bn-IN-TanishaaNeural",
+    "locales": {
+      "bn-BD": [
+        {
+          "voice": "bn-BD-NabanitaNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "bn-BD-PradeepNeural",
+          "gender": "Male"
+        }
+      ],
+      "bn-IN": [
+        {
+          "voice": "bn-IN-TanishaaNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "bn-IN-BashkarNeural",
+          "gender": "Male"
+        }
+      ]
+    }
+  },
+  "bosnian": {
+    "code": "bs",
+    "label": "Bosnian",
+    "defaultLocale": "bs-BA",
+    "defaultVoice": "bs-BA-VesnaNeural",
+    "locales": {
+      "bs-BA": [
+        {
+          "voice": "bs-BA-VesnaNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "bs-BA-GoranNeural",
+          "gender": "Male"
+        }
+      ]
+    }
+  },
+  "bulgarian": {
+    "code": "bg",
+    "label": "Bulgarian",
+    "defaultLocale": "bg-BG",
+    "defaultVoice": "bg-BG-KalinaNeural",
+    "locales": {
+      "bg-BG": [
+        {
+          "voice": "bg-BG-KalinaNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "bg-BG-BorislavNeural",
+          "gender": "Male"
+        }
+      ]
+    }
+  },
+  "burmese": {
+    "code": "my",
+    "label": "Burmese",
+    "defaultLocale": "my-MM",
+    "defaultVoice": "my-MM-NilarNeural",
+    "locales": {
+      "my-MM": [
+        {
+          "voice": "my-MM-NilarNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "my-MM-ThihaNeural",
+          "gender": "Male"
+        }
+      ]
+    }
+  },
+  "catalan": {
+    "code": "ca",
+    "label": "Catalan",
+    "defaultLocale": "ca-ES",
+    "defaultVoice": "ca-ES-JoanaNeural",
+    "locales": {
+      "ca-ES": [
+        {
+          "voice": "ca-ES-JoanaNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "ca-ES-EnricNeural",
+          "gender": "Male"
+        }
+      ]
+    }
+  },
+  "chinese": {
+    "code": "zh",
+    "label": "Chinese",
+    "defaultLocale": "zh-CN",
+    "defaultVoice": "zh-CN-XiaoxiaoNeural",
+    "locales": {
+      "zh-CN": [
+        {
+          "voice": "zh-CN-XiaoxiaoNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "zh-CN-YunxiNeural",
+          "gender": "Male"
+        },
+        {
+          "voice": "zh-CN-XiaoyiNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "zh-CN-YunjianNeural",
+          "gender": "Male"
+        },
+        {
+          "voice": "zh-CN-YunxiaNeural",
+          "gender": "Male"
+        },
+        {
+          "voice": "zh-CN-YunyangNeural",
+          "gender": "Male"
+        }
+      ],
+      "zh-CN-liaoning": [
+        {
+          "voice": "zh-CN-liaoning-XiaobeiNeural",
+          "gender": "Female"
+        }
+      ],
+      "zh-CN-shaanxi": [
+        {
+          "voice": "zh-CN-shaanxi-XiaoniNeural",
+          "gender": "Female"
+        }
+      ],
+      "zh-HK": [
+        {
+          "voice": "zh-HK-HiuGaaiNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "zh-HK-HiuMaanNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "zh-HK-WanLungNeural",
+          "gender": "Male"
+        }
+      ],
+      "zh-TW": [
+        {
+          "voice": "zh-TW-HsiaoChenNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "zh-TW-YunJheNeural",
+          "gender": "Male"
+        },
+        {
+          "voice": "zh-TW-HsiaoYuNeural",
+          "gender": "Female"
+        }
+      ]
+    }
+  },
+  "croatian": {
+    "code": "hr",
+    "label": "Croatian",
+    "defaultLocale": "hr-HR",
+    "defaultVoice": "hr-HR-GabrijelaNeural",
+    "locales": {
+      "hr-HR": [
+        {
+          "voice": "hr-HR-GabrijelaNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "hr-HR-SreckoNeural",
+          "gender": "Male"
+        }
+      ]
+    }
+  },
+  "czech": {
+    "code": "cs",
+    "label": "Czech",
+    "defaultLocale": "cs-CZ",
+    "defaultVoice": "cs-CZ-VlastaNeural",
+    "locales": {
+      "cs-CZ": [
+        {
+          "voice": "cs-CZ-VlastaNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "cs-CZ-AntoninNeural",
+          "gender": "Male"
+        }
+      ]
+    }
+  },
+  "danish": {
+    "code": "da",
+    "label": "Danish",
+    "defaultLocale": "da-DK",
+    "defaultVoice": "da-DK-ChristelNeural",
+    "locales": {
+      "da-DK": [
+        {
+          "voice": "da-DK-ChristelNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "da-DK-JeppeNeural",
+          "gender": "Male"
+        }
+      ]
+    }
+  },
+  "dutch": {
+    "code": "nl",
+    "label": "Dutch",
+    "defaultLocale": "nl-NL",
+    "defaultVoice": "nl-NL-FennaNeural",
+    "locales": {
+      "nl-BE": [
+        {
+          "voice": "nl-BE-DenaNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "nl-BE-ArnaudNeural",
+          "gender": "Male"
+        }
+      ],
+      "nl-NL": [
+        {
+          "voice": "nl-NL-FennaNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "nl-NL-MaartenNeural",
+          "gender": "Male"
+        },
+        {
+          "voice": "nl-NL-ColetteNeural",
+          "gender": "Female"
+        }
+      ]
+    }
+  },
+  "english": {
+    "code": "en",
+    "label": "English",
+    "defaultLocale": "en-US",
+    "defaultVoice": "en-US-JennyNeural",
+    "locales": {
+      "en-AU": [
+        {
+          "voice": "en-AU-NatashaNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "en-AU-WilliamNeural",
+          "gender": "Male"
+        },
+        {
+          "voice": "en-AU-WilliamMultilingualNeural",
+          "gender": "Male"
+        }
+      ],
+      "en-CA": [
+        {
+          "voice": "en-CA-ClaraNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "en-CA-LiamNeural",
+          "gender": "Male"
+        }
+      ],
+      "en-GB": [
+        {
+          "voice": "en-GB-LibbyNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "en-GB-RyanNeural",
+          "gender": "Male"
+        },
+        {
+          "voice": "en-GB-MaisieNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "en-GB-SoniaNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "en-GB-ThomasNeural",
+          "gender": "Male"
+        }
+      ],
+      "en-HK": [
+        {
+          "voice": "en-HK-YanNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "en-HK-SamNeural",
+          "gender": "Male"
+        }
+      ],
+      "en-IE": [
+        {
+          "voice": "en-IE-EmilyNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "en-IE-ConnorNeural",
+          "gender": "Male"
+        }
+      ],
+      "en-IN": [
+        {
+          "voice": "en-IN-NeerjaNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "en-IN-PrabhatNeural",
+          "gender": "Male"
+        },
+        {
+          "voice": "en-IN-NeerjaExpressiveNeural",
+          "gender": "Female"
+        }
+      ],
+      "en-KE": [
+        {
+          "voice": "en-KE-AsiliaNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "en-KE-ChilembaNeural",
+          "gender": "Male"
+        }
+      ],
+      "en-NG": [
+        {
+          "voice": "en-NG-EzinneNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "en-NG-AbeoNeural",
+          "gender": "Male"
+        }
+      ],
+      "en-NZ": [
+        {
+          "voice": "en-NZ-MollyNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "en-NZ-MitchellNeural",
+          "gender": "Male"
+        }
+      ],
+      "en-PH": [
+        {
+          "voice": "en-PH-RosaNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "en-PH-JamesNeural",
+          "gender": "Male"
+        }
+      ],
+      "en-SG": [
+        {
+          "voice": "en-SG-LunaNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "en-SG-WayneNeural",
+          "gender": "Male"
+        }
+      ],
+      "en-TZ": [
+        {
+          "voice": "en-TZ-ImaniNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "en-TZ-ElimuNeural",
+          "gender": "Male"
+        }
+      ],
+      "en-US": [
+        {
+          "voice": "en-US-JennyNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "en-US-GuyNeural",
+          "gender": "Male"
+        },
+        {
+          "voice": "en-US-AnaNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "en-US-AriaNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "en-US-AvaMultilingualNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "en-US-AvaNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "en-US-EmmaMultilingualNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "en-US-EmmaNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "en-US-MichelleNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "en-US-AndrewMultilingualNeural",
+          "gender": "Male"
+        },
+        {
+          "voice": "en-US-AndrewNeural",
+          "gender": "Male"
+        },
+        {
+          "voice": "en-US-BrianMultilingualNeural",
+          "gender": "Male"
+        },
+        {
+          "voice": "en-US-BrianNeural",
+          "gender": "Male"
+        },
+        {
+          "voice": "en-US-ChristopherNeural",
+          "gender": "Male"
+        },
+        {
+          "voice": "en-US-EricNeural",
+          "gender": "Male"
+        },
+        {
+          "voice": "en-US-RogerNeural",
+          "gender": "Male"
+        },
+        {
+          "voice": "en-US-SteffanNeural",
+          "gender": "Male"
+        }
+      ],
+      "en-ZA": [
+        {
+          "voice": "en-ZA-LeahNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "en-ZA-LukeNeural",
+          "gender": "Male"
+        }
+      ]
+    }
+  },
+  "estonian": {
+    "code": "et",
+    "label": "Estonian",
+    "defaultLocale": "et-EE",
+    "defaultVoice": "et-EE-AnuNeural",
+    "locales": {
+      "et-EE": [
+        {
+          "voice": "et-EE-AnuNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "et-EE-KertNeural",
+          "gender": "Male"
+        }
+      ]
+    }
+  },
+  "filipino": {
+    "code": "fil",
+    "label": "Filipino",
+    "defaultLocale": "fil-PH",
+    "defaultVoice": "fil-PH-BlessicaNeural",
+    "locales": {
+      "fil-PH": [
+        {
+          "voice": "fil-PH-BlessicaNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "fil-PH-AngeloNeural",
+          "gender": "Male"
+        }
+      ]
+    }
+  },
+  "finnish": {
+    "code": "fi",
+    "label": "Finnish",
+    "defaultLocale": "fi-FI",
+    "defaultVoice": "fi-FI-NooraNeural",
+    "locales": {
+      "fi-FI": [
+        {
+          "voice": "fi-FI-NooraNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "fi-FI-HarriNeural",
+          "gender": "Male"
+        }
+      ]
+    }
+  },
+  "french": {
+    "code": "fr",
+    "label": "French",
+    "defaultLocale": "fr-FR",
+    "defaultVoice": "fr-FR-DeniseNeural",
+    "locales": {
+      "fr-BE": [
+        {
+          "voice": "fr-BE-CharlineNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "fr-BE-GerardNeural",
+          "gender": "Male"
+        }
+      ],
+      "fr-CA": [
+        {
+          "voice": "fr-CA-SylvieNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "fr-CA-JeanNeural",
+          "gender": "Male"
+        },
+        {
+          "voice": "fr-CA-AntoineNeural",
+          "gender": "Male"
+        },
+        {
+          "voice": "fr-CA-ThierryNeural",
+          "gender": "Male"
+        }
+      ],
+      "fr-CH": [
+        {
+          "voice": "fr-CH-ArianeNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "fr-CH-FabriceNeural",
+          "gender": "Male"
+        }
+      ],
+      "fr-FR": [
+        {
+          "voice": "fr-FR-DeniseNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "fr-FR-HenriNeural",
+          "gender": "Male"
+        },
+        {
+          "voice": "fr-FR-EloiseNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "fr-FR-VivienneMultilingualNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "fr-FR-RemyMultilingualNeural",
+          "gender": "Male"
+        }
+      ]
+    }
+  },
+  "galician": {
+    "code": "gl",
+    "label": "Galician",
+    "defaultLocale": "gl-ES",
+    "defaultVoice": "gl-ES-SabelaNeural",
+    "locales": {
+      "gl-ES": [
+        {
+          "voice": "gl-ES-SabelaNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "gl-ES-RoiNeural",
+          "gender": "Male"
+        }
+      ]
+    }
+  },
+  "georgian": {
+    "code": "ka",
+    "label": "Georgian",
+    "defaultLocale": "ka-GE",
+    "defaultVoice": "ka-GE-EkaNeural",
+    "locales": {
+      "ka-GE": [
+        {
+          "voice": "ka-GE-EkaNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "ka-GE-GiorgiNeural",
+          "gender": "Male"
+        }
+      ]
+    }
+  },
+  "german": {
+    "code": "de",
+    "label": "German",
+    "defaultLocale": "de-DE",
+    "defaultVoice": "de-DE-KatjaNeural",
+    "locales": {
+      "de-AT": [
+        {
+          "voice": "de-AT-IngridNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "de-AT-JonasNeural",
+          "gender": "Male"
+        }
+      ],
+      "de-CH": [
+        {
+          "voice": "de-CH-LeniNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "de-CH-JanNeural",
+          "gender": "Male"
+        }
+      ],
+      "de-DE": [
+        {
+          "voice": "de-DE-KatjaNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "de-DE-ConradNeural",
+          "gender": "Male"
+        },
+        {
+          "voice": "de-DE-AmalaNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "de-DE-SeraphinaMultilingualNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "de-DE-FlorianMultilingualNeural",
+          "gender": "Male"
+        },
+        {
+          "voice": "de-DE-KillianNeural",
+          "gender": "Male"
+        }
+      ]
+    }
+  },
+  "greek": {
+    "code": "el",
+    "label": "Greek",
+    "defaultLocale": "el-GR",
+    "defaultVoice": "el-GR-AthinaNeural",
+    "locales": {
+      "el-GR": [
+        {
+          "voice": "el-GR-AthinaNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "el-GR-NestorasNeural",
+          "gender": "Male"
+        }
+      ]
+    }
+  },
+  "gujarati": {
+    "code": "gu",
+    "label": "Gujarati",
+    "defaultLocale": "gu-IN",
+    "defaultVoice": "gu-IN-DhwaniNeural",
+    "locales": {
+      "gu-IN": [
+        {
+          "voice": "gu-IN-DhwaniNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "gu-IN-NiranjanNeural",
+          "gender": "Male"
+        }
+      ]
+    }
+  },
+  "hebrew": {
+    "code": "he",
+    "label": "Hebrew",
+    "defaultLocale": "he-IL",
+    "defaultVoice": "he-IL-HilaNeural",
+    "locales": {
+      "he-IL": [
+        {
+          "voice": "he-IL-HilaNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "he-IL-AvriNeural",
+          "gender": "Male"
+        }
+      ]
+    }
+  },
+  "hindi": {
+    "code": "hi",
+    "label": "Hindi",
+    "defaultLocale": "hi-IN",
+    "defaultVoice": "hi-IN-SwaraNeural",
+    "locales": {
+      "hi-IN": [
+        {
+          "voice": "hi-IN-SwaraNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "hi-IN-MadhurNeural",
+          "gender": "Male"
+        }
+      ]
+    }
+  },
+  "hungarian": {
+    "code": "hu",
+    "label": "Hungarian",
+    "defaultLocale": "hu-HU",
+    "defaultVoice": "hu-HU-NoemiNeural",
+    "locales": {
+      "hu-HU": [
+        {
+          "voice": "hu-HU-NoemiNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "hu-HU-TamasNeural",
+          "gender": "Male"
+        }
+      ]
+    }
+  },
+  "icelandic": {
+    "code": "is",
+    "label": "Icelandic",
+    "defaultLocale": "is-IS",
+    "defaultVoice": "is-IS-GudrunNeural",
+    "locales": {
+      "is-IS": [
+        {
+          "voice": "is-IS-GudrunNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "is-IS-GunnarNeural",
+          "gender": "Male"
+        }
+      ]
+    }
+  },
+  "indonesian": {
+    "code": "id",
+    "label": "Indonesian",
+    "defaultLocale": "id-ID",
+    "defaultVoice": "id-ID-GadisNeural",
+    "locales": {
+      "id-ID": [
+        {
+          "voice": "id-ID-GadisNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "id-ID-ArdiNeural",
+          "gender": "Male"
+        }
+      ]
+    }
+  },
+  "inuktitut": {
+    "code": "iu",
+    "label": "Inuktitut",
+    "defaultLocale": "iu-Cans-CA",
+    "defaultVoice": "iu-Cans-CA-SiqiniqNeural",
+    "locales": {
+      "iu-Cans-CA": [
+        {
+          "voice": "iu-Cans-CA-SiqiniqNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "iu-Cans-CA-TaqqiqNeural",
+          "gender": "Male"
+        }
+      ],
+      "iu-Latn-CA": [
+        {
+          "voice": "iu-Latn-CA-SiqiniqNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "iu-Latn-CA-TaqqiqNeural",
+          "gender": "Male"
+        }
+      ]
+    }
+  },
+  "irish": {
+    "code": "ga",
+    "label": "Irish",
+    "defaultLocale": "ga-IE",
+    "defaultVoice": "ga-IE-OrlaNeural",
+    "locales": {
+      "ga-IE": [
+        {
+          "voice": "ga-IE-OrlaNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "ga-IE-ColmNeural",
+          "gender": "Male"
+        }
+      ]
+    }
+  },
+  "italian": {
+    "code": "it",
+    "label": "Italian",
+    "defaultLocale": "it-IT",
+    "defaultVoice": "it-IT-ElsaNeural",
+    "locales": {
+      "it-IT": [
+        {
+          "voice": "it-IT-ElsaNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "it-IT-DiegoNeural",
+          "gender": "Male"
+        },
+        {
+          "voice": "it-IT-IsabellaNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "it-IT-GiuseppeMultilingualNeural",
+          "gender": "Male"
+        }
+      ]
+    }
+  },
+  "japanese": {
+    "code": "ja",
+    "label": "Japanese",
+    "defaultLocale": "ja-JP",
+    "defaultVoice": "ja-JP-NanamiNeural",
+    "locales": {
+      "ja-JP": [
+        {
+          "voice": "ja-JP-NanamiNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "ja-JP-KeitaNeural",
+          "gender": "Male"
+        }
+      ]
+    }
+  },
+  "javanese": {
+    "code": "jv",
+    "label": "Javanese",
+    "defaultLocale": "jv-ID",
+    "defaultVoice": "jv-ID-SitiNeural",
+    "locales": {
+      "jv-ID": [
+        {
+          "voice": "jv-ID-SitiNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "jv-ID-DimasNeural",
+          "gender": "Male"
+        }
+      ]
+    }
+  },
+  "kannada": {
+    "code": "kn",
+    "label": "Kannada",
+    "defaultLocale": "kn-IN",
+    "defaultVoice": "kn-IN-SapnaNeural",
+    "locales": {
+      "kn-IN": [
+        {
+          "voice": "kn-IN-SapnaNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "kn-IN-GaganNeural",
+          "gender": "Male"
+        }
+      ]
+    }
+  },
+  "kazakh": {
+    "code": "kk",
+    "label": "Kazakh",
+    "defaultLocale": "kk-KZ",
+    "defaultVoice": "kk-KZ-AigulNeural",
+    "locales": {
+      "kk-KZ": [
+        {
+          "voice": "kk-KZ-AigulNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "kk-KZ-DauletNeural",
+          "gender": "Male"
+        }
+      ]
+    }
+  },
+  "khmer": {
+    "code": "km",
+    "label": "Khmer",
+    "defaultLocale": "km-KH",
+    "defaultVoice": "km-KH-SreymomNeural",
+    "locales": {
+      "km-KH": [
+        {
+          "voice": "km-KH-SreymomNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "km-KH-PisethNeural",
+          "gender": "Male"
+        }
+      ]
+    }
+  },
+  "korean": {
+    "code": "ko",
+    "label": "Korean",
+    "defaultLocale": "ko-KR",
+    "defaultVoice": "ko-KR-SunHiNeural",
+    "locales": {
+      "ko-KR": [
+        {
+          "voice": "ko-KR-SunHiNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "ko-KR-InJoonNeural",
+          "gender": "Male"
+        },
+        {
+          "voice": "ko-KR-HyunsuMultilingualNeural",
+          "gender": "Male"
+        }
+      ]
+    }
+  },
+  "lao": {
+    "code": "lo",
+    "label": "Lao",
+    "defaultLocale": "lo-LA",
+    "defaultVoice": "lo-LA-KeomanyNeural",
+    "locales": {
+      "lo-LA": [
+        {
+          "voice": "lo-LA-KeomanyNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "lo-LA-ChanthavongNeural",
+          "gender": "Male"
+        }
+      ]
+    }
+  },
+  "latvian": {
+    "code": "lv",
+    "label": "Latvian",
+    "defaultLocale": "lv-LV",
+    "defaultVoice": "lv-LV-EveritaNeural",
+    "locales": {
+      "lv-LV": [
+        {
+          "voice": "lv-LV-EveritaNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "lv-LV-NilsNeural",
+          "gender": "Male"
+        }
+      ]
+    }
+  },
+  "lithuanian": {
+    "code": "lt",
+    "label": "Lithuanian",
+    "defaultLocale": "lt-LT",
+    "defaultVoice": "lt-LT-OnaNeural",
+    "locales": {
+      "lt-LT": [
+        {
+          "voice": "lt-LT-OnaNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "lt-LT-LeonasNeural",
+          "gender": "Male"
+        }
+      ]
+    }
+  },
+  "macedonian": {
+    "code": "mk",
+    "label": "Macedonian",
+    "defaultLocale": "mk-MK",
+    "defaultVoice": "mk-MK-MarijaNeural",
+    "locales": {
+      "mk-MK": [
+        {
+          "voice": "mk-MK-MarijaNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "mk-MK-AleksandarNeural",
+          "gender": "Male"
+        }
+      ]
+    }
+  },
+  "malay": {
+    "code": "ms",
+    "label": "Malay",
+    "defaultLocale": "ms-MY",
+    "defaultVoice": "ms-MY-YasminNeural",
+    "locales": {
+      "ms-MY": [
+        {
+          "voice": "ms-MY-YasminNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "ms-MY-OsmanNeural",
+          "gender": "Male"
+        }
+      ]
+    }
+  },
+  "malayalam": {
+    "code": "ml",
+    "label": "Malayalam",
+    "defaultLocale": "ml-IN",
+    "defaultVoice": "ml-IN-SobhanaNeural",
+    "locales": {
+      "ml-IN": [
+        {
+          "voice": "ml-IN-SobhanaNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "ml-IN-MidhunNeural",
+          "gender": "Male"
+        }
+      ]
+    }
+  },
+  "maltese": {
+    "code": "mt",
+    "label": "Maltese",
+    "defaultLocale": "mt-MT",
+    "defaultVoice": "mt-MT-GraceNeural",
+    "locales": {
+      "mt-MT": [
+        {
+          "voice": "mt-MT-GraceNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "mt-MT-JosephNeural",
+          "gender": "Male"
+        }
+      ]
+    }
+  },
+  "marathi": {
+    "code": "mr",
+    "label": "Marathi",
+    "defaultLocale": "mr-IN",
+    "defaultVoice": "mr-IN-AarohiNeural",
+    "locales": {
+      "mr-IN": [
+        {
+          "voice": "mr-IN-AarohiNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "mr-IN-ManoharNeural",
+          "gender": "Male"
+        }
+      ]
+    }
+  },
+  "mongolian": {
+    "code": "mn",
+    "label": "Mongolian",
+    "defaultLocale": "mn-MN",
+    "defaultVoice": "mn-MN-YesuiNeural",
+    "locales": {
+      "mn-MN": [
+        {
+          "voice": "mn-MN-YesuiNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "mn-MN-BataaNeural",
+          "gender": "Male"
+        }
+      ]
+    }
+  },
+  "nepali": {
+    "code": "ne",
+    "label": "Nepali",
+    "defaultLocale": "ne-NP",
+    "defaultVoice": "ne-NP-HemkalaNeural",
+    "locales": {
+      "ne-NP": [
+        {
+          "voice": "ne-NP-HemkalaNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "ne-NP-SagarNeural",
+          "gender": "Male"
+        }
+      ]
+    }
+  },
+  "norwegian": {
+    "code": "nb",
+    "label": "Norwegian",
+    "defaultLocale": "nb-NO",
+    "defaultVoice": "nb-NO-PernilleNeural",
+    "locales": {
+      "nb-NO": [
+        {
+          "voice": "nb-NO-PernilleNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "nb-NO-FinnNeural",
+          "gender": "Male"
+        }
+      ]
+    }
+  },
+  "pashto": {
+    "code": "ps",
+    "label": "Pashto",
+    "defaultLocale": "ps-AF",
+    "defaultVoice": "ps-AF-LatifaNeural",
+    "locales": {
+      "ps-AF": [
+        {
+          "voice": "ps-AF-LatifaNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "ps-AF-GulNawazNeural",
+          "gender": "Male"
+        }
+      ]
+    }
+  },
+  "persian": {
+    "code": "fa",
+    "label": "Persian",
+    "defaultLocale": "fa-IR",
+    "defaultVoice": "fa-IR-DilaraNeural",
+    "locales": {
+      "fa-IR": [
+        {
+          "voice": "fa-IR-DilaraNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "fa-IR-FaridNeural",
+          "gender": "Male"
+        }
+      ]
+    }
+  },
+  "polish": {
+    "code": "pl",
+    "label": "Polish",
+    "defaultLocale": "pl-PL",
+    "defaultVoice": "pl-PL-ZofiaNeural",
+    "locales": {
+      "pl-PL": [
+        {
+          "voice": "pl-PL-ZofiaNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "pl-PL-MarekNeural",
+          "gender": "Male"
+        }
+      ]
+    }
+  },
+  "portuguese": {
+    "code": "pt",
+    "label": "Portuguese",
+    "defaultLocale": "pt-BR",
+    "defaultVoice": "pt-BR-FranciscaNeural",
+    "locales": {
+      "pt-BR": [
+        {
+          "voice": "pt-BR-FranciscaNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "pt-BR-AntonioNeural",
+          "gender": "Male"
+        },
+        {
+          "voice": "pt-BR-ThalitaMultilingualNeural",
+          "gender": "Female"
+        }
+      ],
+      "pt-PT": [
+        {
+          "voice": "pt-PT-RaquelNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "pt-PT-DuarteNeural",
+          "gender": "Male"
+        }
+      ]
+    }
+  },
+  "romanian": {
+    "code": "ro",
+    "label": "Romanian",
+    "defaultLocale": "ro-RO",
+    "defaultVoice": "ro-RO-AlinaNeural",
+    "locales": {
+      "ro-RO": [
+        {
+          "voice": "ro-RO-AlinaNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "ro-RO-EmilNeural",
+          "gender": "Male"
+        }
+      ]
+    }
+  },
+  "russian": {
+    "code": "ru",
+    "label": "Russian",
+    "defaultLocale": "ru-RU",
+    "defaultVoice": "ru-RU-SvetlanaNeural",
+    "locales": {
+      "ru-RU": [
+        {
+          "voice": "ru-RU-SvetlanaNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "ru-RU-DmitryNeural",
+          "gender": "Male"
+        }
+      ]
+    }
+  },
+  "serbian": {
+    "code": "sr",
+    "label": "Serbian",
+    "defaultLocale": "sr-RS",
+    "defaultVoice": "sr-RS-SophieNeural",
+    "locales": {
+      "sr-RS": [
+        {
+          "voice": "sr-RS-SophieNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "sr-RS-NicholasNeural",
+          "gender": "Male"
+        }
+      ]
+    }
+  },
+  "sinhala": {
+    "code": "si",
+    "label": "Sinhala",
+    "defaultLocale": "si-LK",
+    "defaultVoice": "si-LK-ThiliniNeural",
+    "locales": {
+      "si-LK": [
+        {
+          "voice": "si-LK-ThiliniNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "si-LK-SameeraNeural",
+          "gender": "Male"
+        }
+      ]
+    }
+  },
+  "slovak": {
+    "code": "sk",
+    "label": "Slovak",
+    "defaultLocale": "sk-SK",
+    "defaultVoice": "sk-SK-ViktoriaNeural",
+    "locales": {
+      "sk-SK": [
+        {
+          "voice": "sk-SK-ViktoriaNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "sk-SK-LukasNeural",
+          "gender": "Male"
+        }
+      ]
+    }
+  },
+  "slovenian": {
+    "code": "sl",
+    "label": "Slovenian",
+    "defaultLocale": "sl-SI",
+    "defaultVoice": "sl-SI-PetraNeural",
+    "locales": {
+      "sl-SI": [
+        {
+          "voice": "sl-SI-PetraNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "sl-SI-RokNeural",
+          "gender": "Male"
+        }
+      ]
+    }
+  },
+  "somali": {
+    "code": "so",
+    "label": "Somali",
+    "defaultLocale": "so-SO",
+    "defaultVoice": "so-SO-UbaxNeural",
+    "locales": {
+      "so-SO": [
+        {
+          "voice": "so-SO-UbaxNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "so-SO-MuuseNeural",
+          "gender": "Male"
+        }
+      ]
+    }
+  },
+  "spanish": {
+    "code": "es",
+    "label": "Spanish",
+    "defaultLocale": "es-ES",
+    "defaultVoice": "es-ES-ElviraNeural",
+    "locales": {
+      "es-AR": [
+        {
+          "voice": "es-AR-ElenaNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "es-AR-TomasNeural",
+          "gender": "Male"
+        }
+      ],
+      "es-BO": [
+        {
+          "voice": "es-BO-SofiaNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "es-BO-MarceloNeural",
+          "gender": "Male"
+        }
+      ],
+      "es-CL": [
+        {
+          "voice": "es-CL-CatalinaNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "es-CL-LorenzoNeural",
+          "gender": "Male"
+        }
+      ],
+      "es-CO": [
+        {
+          "voice": "es-CO-SalomeNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "es-CO-GonzaloNeural",
+          "gender": "Male"
+        }
+      ],
+      "es-CR": [
+        {
+          "voice": "es-CR-MariaNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "es-CR-JuanNeural",
+          "gender": "Male"
+        }
+      ],
+      "es-CU": [
+        {
+          "voice": "es-CU-BelkysNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "es-CU-ManuelNeural",
+          "gender": "Male"
+        }
+      ],
+      "es-DO": [
+        {
+          "voice": "es-DO-RamonaNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "es-DO-EmilioNeural",
+          "gender": "Male"
+        }
+      ],
+      "es-EC": [
+        {
+          "voice": "es-EC-AndreaNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "es-EC-LuisNeural",
+          "gender": "Male"
+        }
+      ],
+      "es-ES": [
+        {
+          "voice": "es-ES-ElviraNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "es-ES-AlvaroNeural",
+          "gender": "Male"
+        },
+        {
+          "voice": "es-ES-XimenaNeural",
+          "gender": "Female"
+        }
+      ],
+      "es-GQ": [
+        {
+          "voice": "es-GQ-TeresaNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "es-GQ-JavierNeural",
+          "gender": "Male"
+        }
+      ],
+      "es-GT": [
+        {
+          "voice": "es-GT-MartaNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "es-GT-AndresNeural",
+          "gender": "Male"
+        }
+      ],
+      "es-HN": [
+        {
+          "voice": "es-HN-KarlaNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "es-HN-CarlosNeural",
+          "gender": "Male"
+        }
+      ],
+      "es-MX": [
+        {
+          "voice": "es-MX-DaliaNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "es-MX-JorgeNeural",
+          "gender": "Male"
+        }
+      ],
+      "es-NI": [
+        {
+          "voice": "es-NI-YolandaNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "es-NI-FedericoNeural",
+          "gender": "Male"
+        }
+      ],
+      "es-PA": [
+        {
+          "voice": "es-PA-MargaritaNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "es-PA-RobertoNeural",
+          "gender": "Male"
+        }
+      ],
+      "es-PE": [
+        {
+          "voice": "es-PE-CamilaNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "es-PE-AlexNeural",
+          "gender": "Male"
+        }
+      ],
+      "es-PR": [
+        {
+          "voice": "es-PR-KarinaNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "es-PR-VictorNeural",
+          "gender": "Male"
+        }
+      ],
+      "es-PY": [
+        {
+          "voice": "es-PY-TaniaNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "es-PY-MarioNeural",
+          "gender": "Male"
+        }
+      ],
+      "es-SV": [
+        {
+          "voice": "es-SV-LorenaNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "es-SV-RodrigoNeural",
+          "gender": "Male"
+        }
+      ],
+      "es-US": [
+        {
+          "voice": "es-US-PalomaNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "es-US-AlonsoNeural",
+          "gender": "Male"
+        }
+      ],
+      "es-UY": [
+        {
+          "voice": "es-UY-ValentinaNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "es-UY-MateoNeural",
+          "gender": "Male"
+        }
+      ],
+      "es-VE": [
+        {
+          "voice": "es-VE-PaolaNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "es-VE-SebastianNeural",
+          "gender": "Male"
+        }
+      ]
+    }
+  },
+  "sundanese": {
+    "code": "su",
+    "label": "Sundanese",
+    "defaultLocale": "su-ID",
+    "defaultVoice": "su-ID-TutiNeural",
+    "locales": {
+      "su-ID": [
+        {
+          "voice": "su-ID-TutiNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "su-ID-JajangNeural",
+          "gender": "Male"
+        }
+      ]
+    }
+  },
+  "swahili": {
+    "code": "sw",
+    "label": "Swahili",
+    "defaultLocale": "sw-KE",
+    "defaultVoice": "sw-KE-ZuriNeural",
+    "locales": {
+      "sw-KE": [
+        {
+          "voice": "sw-KE-ZuriNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "sw-KE-RafikiNeural",
+          "gender": "Male"
+        }
+      ],
+      "sw-TZ": [
+        {
+          "voice": "sw-TZ-RehemaNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "sw-TZ-DaudiNeural",
+          "gender": "Male"
+        }
+      ]
+    }
+  },
+  "swedish": {
+    "code": "sv",
+    "label": "Swedish",
+    "defaultLocale": "sv-SE",
+    "defaultVoice": "sv-SE-SofieNeural",
+    "locales": {
+      "sv-SE": [
+        {
+          "voice": "sv-SE-SofieNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "sv-SE-MattiasNeural",
+          "gender": "Male"
+        }
+      ]
+    }
+  },
+  "tamil": {
+    "code": "ta",
+    "label": "Tamil",
+    "defaultLocale": "ta-IN",
+    "defaultVoice": "ta-IN-PallaviNeural",
+    "locales": {
+      "ta-IN": [
+        {
+          "voice": "ta-IN-PallaviNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "ta-IN-ValluvarNeural",
+          "gender": "Male"
+        }
+      ],
+      "ta-LK": [
+        {
+          "voice": "ta-LK-SaranyaNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "ta-LK-KumarNeural",
+          "gender": "Male"
+        }
+      ],
+      "ta-MY": [
+        {
+          "voice": "ta-MY-KaniNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "ta-MY-SuryaNeural",
+          "gender": "Male"
+        }
+      ],
+      "ta-SG": [
+        {
+          "voice": "ta-SG-VenbaNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "ta-SG-AnbuNeural",
+          "gender": "Male"
+        }
+      ]
+    }
+  },
+  "telugu": {
+    "code": "te",
+    "label": "Telugu",
+    "defaultLocale": "te-IN",
+    "defaultVoice": "te-IN-ShrutiNeural",
+    "locales": {
+      "te-IN": [
+        {
+          "voice": "te-IN-ShrutiNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "te-IN-MohanNeural",
+          "gender": "Male"
+        }
+      ]
+    }
+  },
+  "thai": {
+    "code": "th",
+    "label": "Thai",
+    "defaultLocale": "th-TH",
+    "defaultVoice": "th-TH-PremwadeeNeural",
+    "locales": {
+      "th-TH": [
+        {
+          "voice": "th-TH-PremwadeeNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "th-TH-NiwatNeural",
+          "gender": "Male"
+        }
+      ]
+    }
+  },
+  "turkish": {
+    "code": "tr",
+    "label": "Turkish",
+    "defaultLocale": "tr-TR",
+    "defaultVoice": "tr-TR-EmelNeural",
+    "locales": {
+      "tr-TR": [
+        {
+          "voice": "tr-TR-EmelNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "tr-TR-AhmetNeural",
+          "gender": "Male"
+        }
+      ]
+    }
+  },
+  "ukrainian": {
+    "code": "uk",
+    "label": "Ukrainian",
+    "defaultLocale": "uk-UA",
+    "defaultVoice": "uk-UA-PolinaNeural",
+    "locales": {
+      "uk-UA": [
+        {
+          "voice": "uk-UA-PolinaNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "uk-UA-OstapNeural",
+          "gender": "Male"
+        }
+      ]
+    }
+  },
+  "urdu": {
+    "code": "ur",
+    "label": "Urdu",
+    "defaultLocale": "ur-PK",
+    "defaultVoice": "ur-PK-UzmaNeural",
+    "locales": {
+      "ur-IN": [
+        {
+          "voice": "ur-IN-GulNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "ur-IN-SalmanNeural",
+          "gender": "Male"
+        }
+      ],
+      "ur-PK": [
+        {
+          "voice": "ur-PK-UzmaNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "ur-PK-AsadNeural",
+          "gender": "Male"
+        }
+      ]
+    }
+  },
+  "uzbek": {
+    "code": "uz",
+    "label": "Uzbek",
+    "defaultLocale": "uz-UZ",
+    "defaultVoice": "uz-UZ-MadinaNeural",
+    "locales": {
+      "uz-UZ": [
+        {
+          "voice": "uz-UZ-MadinaNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "uz-UZ-SardorNeural",
+          "gender": "Male"
+        }
+      ]
+    }
+  },
+  "vietnamese": {
+    "code": "vi",
+    "label": "Vietnamese",
+    "defaultLocale": "vi-VN",
+    "defaultVoice": "vi-VN-HoaiMyNeural",
+    "locales": {
+      "vi-VN": [
+        {
+          "voice": "vi-VN-HoaiMyNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "vi-VN-NamMinhNeural",
+          "gender": "Male"
+        }
+      ]
+    }
+  },
+  "welsh": {
+    "code": "cy",
+    "label": "Welsh",
+    "defaultLocale": "cy-GB",
+    "defaultVoice": "cy-GB-NiaNeural",
+    "locales": {
+      "cy-GB": [
+        {
+          "voice": "cy-GB-NiaNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "cy-GB-AledNeural",
+          "gender": "Male"
+        }
+      ]
+    }
+  },
+  "zulu": {
+    "code": "zu",
+    "label": "Zulu",
+    "defaultLocale": "zu-ZA",
+    "defaultVoice": "zu-ZA-ThandoNeural",
+    "locales": {
+      "zu-ZA": [
+        {
+          "voice": "zu-ZA-ThandoNeural",
+          "gender": "Female"
+        },
+        {
+          "voice": "zu-ZA-ThembaNeural",
+          "gender": "Male"
+        }
+      ]
+    }
+  }
+};
 
-    return liveEdgeVoicesByLocale;
-  })();
+const STATIC_VOICE_MODELS_BY_LOCALE = new Map();
+const STATIC_LANGUAGE_KEY_BY_LOCALE = new Map();
+const STATIC_LOCALE_BY_VOICE = new Map();
 
-  try {
-    return await edgeVoiceCatalogRefreshInFlight;
-  } finally {
-    edgeVoiceCatalogRefreshInFlight = null;
+for (const [languageKey, language] of Object.entries(VERIFIED_VOICES_BY_LANGUAGE)) {
+  for (const [locale, entries] of Object.entries(language.locales || {})) {
+    const models = (entries || []).map((entry) => ({
+      ...entry,
+      locale,
+      languageKey,
+    }));
+
+    STATIC_VOICE_MODELS_BY_LOCALE.set(locale, models);
+    STATIC_LANGUAGE_KEY_BY_LOCALE.set(locale, languageKey);
+    for (const model of models) STATIC_LOCALE_BY_VOICE.set(model.voice, locale);
   }
 }
 
-async function validateEdgeVoice(voice) {
-  if (!voice) return false;
+const STATIC_VERIFIED_VOICE_COUNT = [...STATIC_VOICE_MODELS_BY_LOCALE.values()]
+  .reduce((sum, entries) => sum + entries.length, 0);
 
-  if (voiceVerificationInFlight.has(voice)) {
-    return voiceVerificationInFlight.get(voice);
-  }
+if (
+  STATIC_VERIFIED_VOICE_COUNT !== VERIFIED_VOICE_SNAPSHOT.verifiedVoices ||
+  STATIC_VOICE_MODELS_BY_LOCALE.size !== VERIFIED_VOICE_SNAPSHOT.locales ||
+  Object.keys(VERIFIED_VOICES_BY_LANGUAGE).length !== VERIFIED_VOICE_SNAPSHOT.languageFamilies
+) {
+  throw new Error(
+    `[Voice Catalog] Static snapshot integrity mismatch: ` +
+    `${STATIC_VERIFIED_VOICE_COUNT} voices / ${STATIC_VOICE_MODELS_BY_LOCALE.size} locales / ` +
+    `${Object.keys(VERIFIED_VOICES_BY_LANGUAGE).length} languages.`
+  );
+}
 
-  const validationPromise = withVoiceVerificationSlot(async () => {
-    const edge = createSafeMsEdgeTTS();
-    let sourceStream = null;
+// If a statically verified voice later fails during real playback, keep it out
+// of the effective pool for the remainder of this process. This is NOT a
+// verification system and makes no extra Edge request; it only reacts to a
+// failure that already happened during normal TTS.
+const runtimeUnavailableVoices = new Set();
 
-    try {
-      await edge.setMetadata(voice, TTS_VOICE_SETTINGS.outputFormat);
-      const result = await Promise.resolve(edge.toStream('OK.', {
-        rate: TTS_VOICE_SETTINGS.rate,
-        pitch: TTS_VOICE_SETTINGS.pitch,
-        volume: TTS_VOICE_SETTINGS.volume,
-      }));
-      sourceStream = result?.audioStream;
-      if (!sourceStream?.once) throw new Error('No audio stream returned.');
+function isRuntimeUnavailableVoice(voice) {
+  return Boolean(voice && runtimeUnavailableVoices.has(voice));
+}
 
-      // Drain the complete tiny synthesis. Destroying after the first chunk can
-      // race msedge-tts with late WebSocket frames.
-      await new Promise((resolve, reject) => {
-        let settled = false;
-        let receivedAudio = false;
+function markVoiceUnhealthy(voice) {
+  if (!voice || runtimeUnavailableVoices.has(voice)) return;
+  runtimeUnavailableVoices.add(voice);
+  console.warn(`[Voice Catalog] ${voice} failed during real playback and is disabled until the next restart.`);
+}
 
-        const finish = (fn, value) => {
-          if (settled) return;
-          settled = true;
-          clearTimeout(timer);
-          fn(value);
-        };
-
-        const timer = setTimeout(
-          () => finish(reject, new Error('Voice validation timed out.')),
-          EDGE_VOICE_VALIDATION_TIMEOUT_MS,
-        );
-
-        sourceStream.on('data', (chunk) => {
-          if (chunk?.length > 0) receivedAudio = true;
-        });
-        sourceStream.once('error', (error) => finish(reject, error));
-        sourceStream.once('end', () => {
-          if (receivedAudio) finish(resolve);
-          else finish(reject, new Error('Voice produced no audio.'));
-        });
-      });
-
-      return true;
-    } catch (error) {
-      console.warn(`[Voice Verify] ${voice} failed the startup synthesis check:`, error?.message || error);
-      return false;
-    } finally {
-      try { edge.close(); } catch {}
-      try { sourceStream?.destroy?.(); } catch {}
-    }
-  });
-
-  voiceVerificationInFlight.set(voice, validationPromise);
-  try {
-    return await validationPromise;
-  } finally {
-    voiceVerificationInFlight.delete(voice);
-  }
+function getStaticLanguageCatalog(languageKey) {
+  return VERIFIED_VOICES_BY_LANGUAGE[languageKey] || null;
 }
 
 function getVerifiedVoiceModelsForLocale(locale) {
-  return getVoiceModelsForLocale(locale).filter((entry) => isRecentlyVerifiedVoice(entry.voice));
+  return getVoiceModelsForLocale(locale);
 }
-
-async function mapWithConcurrency(items, concurrency, worker) {
-  const results = new Array(items.length);
-  let nextIndex = 0;
-
-  async function runWorker() {
-    while (true) {
-      const index = nextIndex++;
-      if (index >= items.length) return;
-      try {
-        results[index] = await worker(items[index], index);
-      } catch {
-        results[index] = false;
-      }
-    }
-  }
-
-  const workers = Array.from(
-    { length: Math.max(1, Math.min(concurrency, items.length || 1)) },
-    () => runWorker(),
-  );
-  await Promise.all(workers);
-  return results;
-}
-
-async function ensureVerifiedVoicesForLocale(locale) {
-  // Read-only snapshot lookup. This function deliberately performs no Edge
-  // network request and no synthesis.
-  return getVerifiedVoiceModelsForLocale(locale);
-}
-
-function getAllEdgeVoiceCandidates() {
-  const byVoice = new Map();
-
-  for (const entries of liveEdgeVoicesByLocale.values()) {
-    for (const entry of entries || []) {
-      if (entry?.voice && !byVoice.has(entry.voice)) byVoice.set(entry.voice, entry);
-    }
-  }
-
-  for (const [locale, entries] of Object.entries(VOICE_MODELS_BY_LOCALE)) {
-    for (const entry of entries || []) {
-      if (!entry?.voice || byVoice.has(entry.voice)) continue;
-      byVoice.set(entry.voice, { ...entry, locale: entry.locale || locale });
-    }
-  }
-
-  return [...byVoice.values()];
-}
-
-async function runStartupVoiceVerification() {
-  if (startupVoiceVerificationInFlight) return startupVoiceVerificationInFlight;
-  if (startupVoiceVerificationCompletedAt) return verifiedEdgeVoices.size;
-
-  startupVoiceVerificationInFlight = (async () => {
-    const cycleStartedAt = Date.now();
-    console.log('[Voice Verify] Starting one-time startup verification sweep. /voice will not trigger any synthesis checks.');
-
-    await refreshEdgeVoiceCatalog({ force: true }).catch(() => {});
-    const candidates = getAllEdgeVoiceCandidates();
-    console.log(`[Voice Verify] Startup candidate pool: ${candidates.length} voices across ${new Set(candidates.map((entry) => entry.locale || getVoiceLocale(entry.voice))).size} locales.`);
-
-    const results = await mapWithConcurrency(
-      candidates,
-      EDGE_VOICE_GLOBAL_VERIFY_CONCURRENCY,
-      async (entry) => ({ entry, works: await validateEdgeVoice(entry.voice) }),
-    );
-
-    // Publish the verified snapshot only after the complete startup sweep has
-    // finished. It remains frozen for this entire process lifetime. Failed
-    // voices stay unavailable until the bot restarts and performs a new sweep.
-    const completedAt = Date.now();
-    const nextVerified = new Map();
-    const nextFailed = new Map();
-
-    for (const result of results) {
-      const voice = result?.entry?.voice;
-      if (!voice) continue;
-      if (result.works) nextVerified.set(voice, completedAt);
-      else nextFailed.set(voice, Infinity);
-    }
-
-    verifiedEdgeVoices.clear();
-    for (const [voice, at] of nextVerified) verifiedEdgeVoices.set(voice, at);
-    unhealthyEdgeVoices.clear();
-    for (const [voice, until] of nextFailed) unhealthyEdgeVoices.set(voice, until);
-
-    startupVoiceVerificationCompletedAt = completedAt;
-    console.log(
-      `[Voice Verify] Startup sweep complete in ${Math.round((completedAt - cycleStartedAt) / 1000)}s: ` +
-      `${nextVerified.size}/${candidates.length} voices verified, ${nextFailed.size} unavailable. ` +
-      `This snapshot will be reused unchanged until the next bot restart.`
-    );
-
-    // ONE-TIME EXPORT BUILD: save and print the exact verified startup snapshot.
-    // This does not perform any extra synthesis; it only serializes the results
-    // that were already produced by the normal startup sweep above.
-    const verifiedEntries = results
-      .filter((result) => result?.works && result?.entry?.voice)
-      .map((result) => ({
-        voice: result.entry.voice,
-        locale: result.entry.locale || getVoiceLocale(result.entry.voice),
-        gender: result.entry.gender || "Neural",
-        personalities: Array.isArray(result.entry.personalities) ? result.entry.personalities : [],
-        categories: Array.isArray(result.entry.categories) ? result.entry.categories : [],
-      }))
-      .sort((a, b) => a.locale.localeCompare(b.locale) || a.voice.localeCompare(b.voice));
-
-    const verifiedByLocale = {};
-    for (const entry of verifiedEntries) {
-      if (!verifiedByLocale[entry.locale]) verifiedByLocale[entry.locale] = [];
-      verifiedByLocale[entry.locale].push({
-        voice: entry.voice,
-        gender: entry.gender,
-        personalities: entry.personalities,
-        categories: entry.categories,
-      });
-    }
-
-    const failedVoices = results
-      .filter((result) => result && !result.works && result?.entry?.voice)
-      .map((result) => ({
-        voice: result.entry.voice,
-        locale: result.entry.locale || getVoiceLocale(result.entry.voice),
-        gender: result.entry.gender || "Neural",
-      }))
-      .sort((a, b) => a.locale.localeCompare(b.locale) || a.voice.localeCompare(b.voice));
-
-    const snapshot = {
-      generatedAt: new Date(completedAt).toISOString(),
-      advertisedCatalogVoices: [...liveEdgeVoicesByLocale.values()].reduce((sum, list) => sum + (list?.length || 0), 0),
-      startupCandidates: candidates.length,
-      verifiedCount: verifiedEntries.length,
-      failedCount: failedVoices.length,
-      verifiedVoicesByLocale: verifiedByLocale,
-      failedVoices,
-    };
-
-    try {
-      const snapshotPath = path.join(process.cwd(), "verified-voices-snapshot.json");
-      fs.writeFileSync(snapshotPath, JSON.stringify(snapshot, null, 2), "utf8");
-      console.log(`[Voice Verify Export] Saved full snapshot to ${snapshotPath}`);
-    } catch (error) {
-      console.warn('[Voice Verify Export] Could not write verified-voices-snapshot.json:', error?.message || error);
-    }
-
-    // Railway logs are the universal fallback: one compact line per locale,
-    // small enough to copy without relying on a giant single log line.
-    console.log(`[Voice Verify Export] SNAPSHOT_BEGIN verified=${verifiedEntries.length} failed=${failedVoices.length}`);
-    for (const locale of Object.keys(verifiedByLocale).sort()) {
-      const compact = verifiedByLocale[locale].map(({ voice, gender }) => ({ voice, gender }));
-      console.log(`[Voice Verify Export] ${locale} ${JSON.stringify(compact)}`);
-    }
-    console.log(`[Voice Verify Export] FAILED ${JSON.stringify(failedVoices)}`);
-    console.log('[Voice Verify Export] SNAPSHOT_END');
-
-    return nextVerified.size;
-  })();
-
-  try {
-    return await startupVoiceVerificationInFlight;
-  } finally {
-    startupVoiceVerificationInFlight = null;
-  }
-}
-
 
 
 const EMOJI_SPOKEN_NAMES = new Map([
@@ -850,7 +2406,7 @@ const LANGUAGE_CONFIGS = {
   spanish: { label: "Spanish", voice: "es-ES-ElviraNeural", lang: "es-ES", prefix: (name) => `${name} dijo...` },
   french: { label: "French", voice: "fr-FR-DeniseNeural", lang: "fr-FR", prefix: (name) => `${name} a dit...` },
   german: { label: "German", voice: "de-DE-KatjaNeural", lang: "de-DE", prefix: (name) => `${name} sagte...` },
-  chinese: { label: "Chinese (Mandarin)", voice: "zh-CN-XiaoxiaoNeural", lang: "zh-CN", prefix: (name) => `${name} 说...` },
+  chinese: { label: "Chinese", voice: "zh-CN-XiaoxiaoNeural", lang: "zh-CN", prefix: (name) => `${name} 说...` },
   japanese: { label: "Japanese", voice: "ja-JP-NanamiNeural", lang: "ja-JP", prefix: (name) => `${name} が言いました...` },
   arabic: { label: "Arabic", voice: "ar-SA-ZariyahNeural", lang: "ar-SA", prefix: (name) => `قال ${name}...` },
   russian: { label: "Russian", voice: "ru-RU-SvetlanaNeural", lang: "ru-RU", prefix: (name) => `${name} сказал...` },
@@ -898,9 +2454,41 @@ const LANGUAGE_CONFIGS = {
   swahili: { label: "Swahili", voice: "sw-KE-ZuriNeural", lang: "sw-KE", prefix: (name) => `${name} alisema...` },
   afrikaans: { label: "Afrikaans", voice: "af-ZA-AdriNeural", lang: "af-ZA", prefix: (name) => `${name} het gesê...` },
   amharic: { label: "Amharic", voice: "am-ET-MekdesNeural", lang: "am-ET", prefix: (name) => `${name} alē...` },
-  yoruba: { label: "Yoruba", voice: "yo-NG-AbebiNeural", lang: "yo-NG", prefix: (name) => `${name} sọ pé...` },
+  azerbaijani: { label: "Azerbaijani", voice: "az-AZ-BanuNeural", lang: "az-AZ", prefix: (name) => `${name}:` },
+  bosnian: { label: "Bosnian", voice: "bs-BA-VesnaNeural", lang: "bs-BA", prefix: (name) => `${name}:` },
+  galician: { label: "Galician", voice: "gl-ES-SabelaNeural", lang: "gl-ES", prefix: (name) => `${name}:` },
+  icelandic: { label: "Icelandic", voice: "is-IS-GudrunNeural", lang: "is-IS", prefix: (name) => `${name}:` },
+  inuktitut: { label: "Inuktitut", voice: "iu-Cans-CA-SiqiniqNeural", lang: "iu-Cans-CA", prefix: (name) => `${name}:` },
+  javanese: { label: "Javanese", voice: "jv-ID-SitiNeural", lang: "jv-ID", prefix: (name) => `${name}:` },
+  georgian: { label: "Georgian", voice: "ka-GE-EkaNeural", lang: "ka-GE", prefix: (name) => `${name}:` },
+  kazakh: { label: "Kazakh", voice: "kk-KZ-AigulNeural", lang: "kk-KZ", prefix: (name) => `${name}:` },
+  khmer: { label: "Khmer", voice: "km-KH-SreymomNeural", lang: "km-KH", prefix: (name) => `${name}:` },
+  lao: { label: "Lao", voice: "lo-LA-KeomanyNeural", lang: "lo-LA", prefix: (name) => `${name}:` },
+  macedonian: { label: "Macedonian", voice: "mk-MK-MarijaNeural", lang: "mk-MK", prefix: (name) => `${name}:` },
+  mongolian: { label: "Mongolian", voice: "mn-MN-YesuiNeural", lang: "mn-MN", prefix: (name) => `${name}:` },
+  maltese: { label: "Maltese", voice: "mt-MT-GraceNeural", lang: "mt-MT", prefix: (name) => `${name}:` },
+  burmese: { label: "Burmese", voice: "my-MM-NilarNeural", lang: "my-MM", prefix: (name) => `${name}:` },
+  nepali: { label: "Nepali", voice: "ne-NP-HemkalaNeural", lang: "ne-NP", prefix: (name) => `${name}:` },
+  pashto: { label: "Pashto", voice: "ps-AF-LatifaNeural", lang: "ps-AF", prefix: (name) => `${name}:` },
+  sinhala: { label: "Sinhala", voice: "si-LK-ThiliniNeural", lang: "si-LK", prefix: (name) => `${name}:` },
+  somali: { label: "Somali", voice: "so-SO-UbaxNeural", lang: "so-SO", prefix: (name) => `${name}:` },
+  albanian: { label: "Albanian", voice: "sq-AL-AnilaNeural", lang: "sq-AL", prefix: (name) => `${name}:` },
+  sundanese: { label: "Sundanese", voice: "su-ID-TutiNeural", lang: "su-ID", prefix: (name) => `${name}:` },
+  uzbek: { label: "Uzbek", voice: "uz-UZ-MadinaNeural", lang: "uz-UZ", prefix: (name) => `${name}:` },
   zulu: { label: "Zulu", voice: "zu-ZA-ThandoNeural", lang: "zu-ZA", prefix: (name) => `U-${name} uthe...` },
 };
+
+const STATIC_LANGUAGE_CONFIG_KEYS = Object.keys(VERIFIED_VOICES_BY_LANGUAGE);
+const missingLanguageConfigs = STATIC_LANGUAGE_CONFIG_KEYS.filter((key) => !LANGUAGE_CONFIGS[key]);
+const nonVerifiedLanguageConfigs = Object.keys(LANGUAGE_CONFIGS).filter((key) => !VERIFIED_VOICES_BY_LANGUAGE[key]);
+
+if (missingLanguageConfigs.length || nonVerifiedLanguageConfigs.length) {
+  throw new Error(
+    `[Voice Catalog] Language categorization mismatch. Missing configs: ` +
+    `${missingLanguageConfigs.join(", ") || "none"}; unsupported configs: ` +
+    `${nonVerifiedLanguageConfigs.join(", ") || "none"}.`
+  );
+}
 
 // In-memory per-guild settings. Settings reset when the bot process restarts.
 // This intentionally avoids filesystem/database persistence so the repo stays self-contained.
@@ -908,7 +2496,7 @@ const guildSettingsCache = new Map();
 
 const DEFAULT_GUILD_SETTINGS = {
   serverLanguage: "english",
-  serverAccent: "us",
+  serverAccent: "en-us",
   volume: 1,
   // Kept for backward compatibility with older settings files.
   accent: "default",
@@ -956,47 +2544,109 @@ function getGuildLanguage(guildId, userId = null) {
 }
 
 function getGuildLanguageConfig(guildId, userId = null) {
-  const language = getGuildLanguage(guildId, userId);
-  return LANGUAGE_CONFIGS[language] || LANGUAGE_CONFIGS.english;
+  const selection = getGuildLanguageSelection(guildId, userId);
+  const config = LANGUAGE_CONFIGS[selection.language] || LANGUAGE_CONFIGS.english;
+
+  // Keep the language-level prefix/metadata, but use the exact selected
+  // locale for number/date normalization and sentence segmentation.
+  return {
+    ...config,
+    lang: getSelectionLocale(selection),
+  };
 }
 
 function getDefaultAccent(languageKey) {
-  const accents = VOICE_ACCENTS[languageKey];
-  if (accents?.default) return accents.default;
+  const catalog = getStaticLanguageCatalog(languageKey);
   const config = LANGUAGE_CONFIGS[languageKey] || LANGUAGE_CONFIGS.english;
-  return localeRegion(config.lang || "en-US");
+  return String(catalog?.defaultLocale || config.lang || "en-US").toLowerCase();
 }
 
 function localeRegion(locale) {
-  return String(locale || "").split("-")[1]?.toLowerCase() || "default";
+  const parts = String(locale || "").split("-");
+  const region = parts.find((part, index) => index > 0 && /^[A-Za-z]{2}$/.test(part));
+  return region?.toLowerCase() || parts[1]?.toLowerCase() || "default";
+}
+
+function formatLocaleVariant(locale) {
+  const parts = String(locale || "").split("-").slice(1);
+  if (!parts.length) return String(locale || "").toUpperCase();
+
+  return parts
+    .map((part) => {
+      if (/^[A-Za-z]{2}$/.test(part) || /^\d{3}$/.test(part)) return part.toUpperCase();
+      return part.charAt(0).toUpperCase() + part.slice(1);
+    })
+    .join(" · ");
+}
+
+function getPreferredVoiceForLocale(locale) {
+  const all = STATIC_VOICE_MODELS_BY_LOCALE.get(locale) || [];
+  if (!all.length) return null;
+  return all.find((entry) => entry.gender === "Female")?.voice || all[0].voice;
 }
 
 function getAccentEntries(languageKey) {
-  const accents = VOICE_ACCENTS[languageKey];
-  if (accents) {
-    const preferredRegionOrder = ["us", "in", "uk", "au", "ca", "ie", "nz", "za", "sg", "ng", "ph", "my", "mx", "es", "br", "pt", "fr", "de", "at", "ch", "cn", "tw", "hk", "sa", "ae", "eg"];
-    return Object.entries(accents)
-      .filter(([key]) => key !== "default")
-      .sort(([a], [b]) => {
-        const ai = preferredRegionOrder.indexOf(a);
-        const bi = preferredRegionOrder.indexOf(b);
-        if (ai === -1 && bi === -1) return a.localeCompare(b);
-        if (ai === -1) return 1;
-        if (bi === -1) return -1;
-        return ai - bi;
-      })
-      .map(([key, voice]) => ({ key, voice }));
-  }
+  const catalog = getStaticLanguageCatalog(languageKey);
+  if (!catalog) return [];
 
-  const config = LANGUAGE_CONFIGS[languageKey];
-  return config ? [{ key: localeRegion(config.lang), voice: config.voice }] : [];
+  const defaultLocale = catalog.defaultLocale;
+  return Object.keys(catalog.locales || {})
+    .sort((a, b) => {
+      if (a === defaultLocale) return -1;
+      if (b === defaultLocale) return 1;
+      return a.localeCompare(b);
+    })
+    .map((locale) => ({
+      key: locale.toLowerCase(),
+      locale,
+      voice:
+        locale === defaultLocale && catalog.defaultVoice
+          ? catalog.defaultVoice
+          : getPreferredVoiceForLocale(locale),
+      voiceCount: (catalog.locales?.[locale] || []).length,
+    }));
+}
+
+function getLocaleForAccent(languageKey, accent = "default") {
+  const catalog = getStaticLanguageCatalog(languageKey);
+  const config = LANGUAGE_CONFIGS[languageKey] || LANGUAGE_CONFIGS.english;
+  if (!catalog) return config.lang || "en-US";
+
+  const locales = Object.keys(catalog.locales || {});
+  if (!locales.length) return config.lang || "en-US";
+
+  const requested = String(accent || "").toLowerCase();
+  if (!requested || requested === "default") return catalog.defaultLocale || locales[0];
+
+  // New static-catalog settings store the complete locale as the accent key.
+  const exact = locales.find((locale) => locale.toLowerCase() === requested);
+  if (exact) return exact;
+
+  // Accept old in-memory region-only values such as "us", "uk", "br", etc.
+  // This matters only during hot code reloads; normal deploys reset the Map.
+  const defaultLocale = catalog.defaultLocale || locales[0];
+  if (localeRegion(defaultLocale) === requested) return defaultLocale;
+
+  const regional = locales.find((locale) => localeRegion(locale) === requested);
+  return regional || defaultLocale;
 }
 
 function getVoiceForLanguage(languageKey, accent = "default") {
+  const catalog = getStaticLanguageCatalog(languageKey);
   const config = LANGUAGE_CONFIGS[languageKey] || LANGUAGE_CONFIGS.english;
-  const accents = VOICE_ACCENTS[languageKey];
-  if (accents) return accents[accent] || accents.default || config.voice;
-  return config.voice;
+  const locale = getLocaleForAccent(languageKey, accent);
+
+  if (catalog?.defaultLocale === locale && catalog.defaultVoice) {
+    const defaultStillAvailable = getVoiceModelsForLocale(locale)
+      .some((entry) => entry.voice === catalog.defaultVoice);
+    if (defaultStillAvailable) return catalog.defaultVoice;
+  }
+
+  const available = getVoiceModelsForLocale(locale);
+  return available.find((entry) => entry.gender === "Female")?.voice
+    || available[0]?.voice
+    || getPreferredVoiceForLocale(locale)
+    || config.voice;
 }
 
 function getEffectiveAccent(guildId, userId = null) {
@@ -1005,15 +2655,13 @@ function getEffectiveAccent(guildId, userId = null) {
 
 function getLanguageVariantLabel(languageKey, accent) {
   const config = LANGUAGE_CONFIGS[languageKey] || LANGUAGE_CONFIGS.english;
-  const entries = getAccentEntries(languageKey);
-  const entry = entries.find(item => item.key === accent);
-  const voice = entry?.voice || getVoiceForLanguage(languageKey, accent);
-  const region = localeRegion(voice);
-  return `${config.label} (${region.toUpperCase()})`;
+  const locale = getLocaleForAccent(languageKey, accent);
+  return `${config.label} (${formatLocaleVariant(locale)})`;
 }
 
 function getLanguageVariants() {
   const variants = [];
+
   for (const [languageKey, config] of Object.entries(LANGUAGE_CONFIGS)) {
     const entries = getAccentEntries(languageKey);
     for (const entry of entries) {
@@ -1021,42 +2669,47 @@ function getLanguageVariants() {
         value: `${languageKey}::${entry.key}`,
         languageKey,
         accent: entry.key,
+        locale: entry.locale,
+        voiceCount: entry.voiceCount,
         label: getLanguageVariantLabel(languageKey, entry.key),
         config,
       });
     }
   }
-  return variants;
+
+  return variants.sort(
+    (a, b) =>
+      a.config.label.localeCompare(b.config.label) ||
+      a.locale.localeCompare(b.locale)
+  );
 }
 
 function getVoiceLocale(voice) {
+  if (STATIC_LOCALE_BY_VOICE.has(voice)) return STATIC_LOCALE_BY_VOICE.get(voice);
   return String(voice || "").split("-").slice(0, 2).join("-");
 }
 
 function getSelectionLocale(selection) {
-  const baseVoice = getVoiceForLanguage(selection.language, selection.accent);
-  return getVoiceLocale(baseVoice);
+  return getLocaleForAccent(selection.language, selection.accent);
 }
 
 function getVoiceModelsForLocale(locale) {
-  const live = liveEdgeVoicesByLocale.get(locale) || [];
-  const fallback = VOICE_MODELS_BY_LOCALE[locale] || [];
-  const merged = [...live];
-  for (const entry of fallback) {
-    if (!merged.some((item) => item.voice === entry.voice)) merged.push(entry);
-  }
-  return merged.filter((entry) => !isTemporarilyUnhealthyVoice(entry.voice));
+  return (STATIC_VOICE_MODELS_BY_LOCALE.get(locale) || [])
+    .filter((entry) => !isRuntimeUnavailableVoice(entry.voice));
 }
 
 function isListedEdgeVoice(voice) {
-  if (!voice || isTemporarilyUnhealthyVoice(voice)) return false;
+  if (!voice || isRuntimeUnavailableVoice(voice)) return false;
   const locale = getVoiceLocale(voice);
   return getVoiceModelsForLocale(locale).some((entry) => entry.voice === voice);
 }
 
 function getVoicePersonaName(voice) {
-  const parts = String(voice || "").split("-");
-  const raw = parts.slice(2).join("-") || voice || "Default";
+  const locale = getVoiceLocale(voice);
+  const raw = String(voice || "").startsWith(`${locale}-`)
+    ? String(voice).slice(locale.length + 1)
+    : String(voice || "").split("-").slice(2).join("-") || voice || "Default";
+
   return raw
     .replace(/IndicNeural$/i, " Indic")
     .replace(/MultilingualNeural$/i, " Multilingual")
@@ -1066,10 +2719,13 @@ function getVoicePersonaName(voice) {
 
 function getVoiceModelInfo(voice) {
   const locale = getVoiceLocale(voice);
-  const model = getVoiceModelsForLocale(locale).find((entry) => entry.voice === voice);
+  const model = getVoiceModelsForLocale(locale).find((entry) => entry.voice === voice)
+    || STATIC_VOICE_MODELS_BY_LOCALE.get(locale)?.find((entry) => entry.voice === voice);
+
   return {
     voice,
     locale,
+    languageKey: model?.languageKey || STATIC_LANGUAGE_KEY_BY_LOCALE.get(locale) || null,
     name: getVoicePersonaName(voice),
     gender: model?.gender || "Neural",
   };
@@ -1621,7 +3277,7 @@ const HELP_CATEGORIES = {
     get body() {
       const languages = Object.values(LANGUAGE_CONFIGS).map(c => c.label).join(", ");
       const variantCount = getLanguageVariants().length;
-      return `Bozos TTS supports **${Object.keys(LANGUAGE_CONFIGS).length} languages** across **${variantCount} regional voices**:\n\n${languages}\n\nUse \`/language\` to choose both language and accent!`;
+      return `Bozos TTS supports **${Object.keys(LANGUAGE_CONFIGS).length} languages** across **${variantCount} regional locales**, with **${VERIFIED_VOICE_SNAPSHOT.verifiedVoices} permanently verified neural voices**:\n\n${languages}\n\nUse \`/language\` to choose a language/region, then \`/voice\` to choose a voice!`;
     },
   },
   support: {
@@ -2884,9 +4540,12 @@ client.once(
   async (readyClient) => {
     console.log(`Logged in as ${readyClient.user.tag}`);
     console.log(`[Pronunciation] Grand pronunciation engine ${PRONUNCIATION_ENGINE_VERSION} loaded.`);
-    // Build the complete verified voice snapshot exactly once per process start.
-    // /voice and voice selection are read-only consumers for the rest of the run.
-    void runStartupVoiceVerification();
+    console.log(
+      `[Voice Catalog] Static verified catalog loaded: ` +
+      `${VERIFIED_VOICE_SNAPSHOT.verifiedVoices} voices across ${VERIFIED_VOICE_SNAPSHOT.locales} locales, ` +
+      `categorized into ${VERIFIED_VOICE_SNAPSHOT.languageFamilies} languages. ` +
+      `Runtime voice verification is disabled.`
+    );
 
     readyClient.user.setPresence({
       activities: [
@@ -2999,6 +4658,9 @@ function generateLanguageMenuComponents(page = 0, scope = "server") {
         new StringSelectMenuOptionBuilder()
           .setLabel(entry.label)
           .setValue(entry.value)
+          .setDescription(
+            `${entry.locale} • ${entry.voiceCount} verified voice${entry.voiceCount === 1 ? "" : "s"}`.slice(0, 100)
+          )
       )
     );
 
@@ -3032,6 +4694,7 @@ function generateVoiceMenuComponents(guildId, userId, scope = "server", page = 0
   const targetUserId = scope === "personal" ? userId : null;
   const selection = getGuildLanguageSelection(guildId, targetUserId);
   const locale = getSelectionLocale(selection);
+  const languageLabel = (LANGUAGE_CONFIGS[selection.language] || LANGUAGE_CONFIGS.english).label;
   const available = getVerifiedVoiceModelsForLocale(locale);
   const pageSize = 25;
   const totalPages = Math.max(1, Math.ceil(available.length / pageSize));
@@ -3042,7 +4705,7 @@ function generateVoiceMenuComponents(guildId, userId, scope = "server", page = 0
   if (pageVoices.length) {
     const menu = new StringSelectMenuBuilder()
       .setCustomId(`voice_select_${scope}_${currentPage}`)
-      .setPlaceholder(`Select ${locale} verified voice${totalPages > 1 ? ` (Page ${currentPage + 1}/${totalPages})` : ''}`)
+      .setPlaceholder(`Select ${languageLabel} voice • ${locale}${totalPages > 1 ? ` (Page ${currentPage + 1}/${totalPages})` : ''}`)
       .addOptions(
         pageVoices.map((entry) =>
           new StringSelectMenuOptionBuilder()
@@ -3070,7 +4733,7 @@ function generateVoiceMenuComponents(guildId, userId, scope = "server", page = 0
     );
   }
 
-  return { locale, selection, voices: available, components, currentPage, totalPages };
+  return { locale, languageLabel, selection, voices: available, components, currentPage, totalPages };
 }
 
 
@@ -3115,7 +4778,7 @@ client.on(
           new ContainerBuilder()
             .setAccentColor(COLORS.INFO)
             .addTextDisplayComponents((td) => td.setContent(
-              `## 🎙️ Choose Neural Voice\n**${menu.locale}** • ${menu.voices.length} verified voice option${menu.voices.length === 1 ? '' : 's'}${menu.totalPages > 1 ? ` • Page ${menu.currentPage + 1}/${menu.totalPages}` : ''}`
+              `## 🎙️ Choose Neural Voice\n**${menu.languageLabel}** • **${menu.locale}** • ${menu.voices.length} static verified voice${menu.voices.length === 1 ? '' : 's'}${menu.totalPages > 1 ? ` • Page ${menu.currentPage + 1}/${menu.totalPages}` : ''}`
             )),
           ...menu.components,
         ],
@@ -3218,16 +4881,15 @@ client.on(
         }).catch(() => {});
       }
 
-      // The startup sweep is the only code path allowed to verification-test
-      // voices. Selection performs no Edge request; if it is in this menu, it
-      // already belongs to the frozen startup snapshot.
+      // /voice is backed entirely by the permanent static catalog.
+      // Selecting a voice performs no Edge catalog request and no synthesis test.
       if (scope === "personal") {
         settings.userVoices[interaction.user.id] = selectedVoice;
       } else {
         settings.serverVoice = selectedVoice;
       }
 
-      return interaction.editReply({
+      return interaction.update({
         components: [
           new ContainerBuilder()
             .setAccentColor(COLORS.SUCCESS)
@@ -3606,17 +5268,6 @@ client.on(
       const scope = interaction.options.getString("scope", true);
       const targetUserId = scope === "personal" ? interaction.user.id : null;
 
-      if (!startupVoiceVerificationCompletedAt) {
-        return replyWithV2(interaction, {
-          title: "Voice Pool Is Warming Up",
-          description: startupVoiceVerificationInFlight
-            ? "Bozos is running its one-time startup voice verification sweep. No `/voice` request can start extra Edge tests. Please try again after the sweep finishes."
-            : "The verified voice snapshot is not available yet. It is created once when this bot process starts.",
-          color: COLORS.WARNING,
-          ephemeral: true,
-        });
-      }
-
       const { components, locale, selection, voices } = generateVoiceMenuComponents(
         interaction.guildId,
         interaction.user.id,
@@ -3637,11 +5288,8 @@ client.on(
                   : "This changes the server default neural voice.",
                 `Language: **${languageLabel}**`,
                 `Current voice: **${currentInfo.name} — ${currentInfo.gender}** (${locale})`,
-                `Verified pool: **${voices.length} working voice${voices.length === 1 ? '' : 's'}**`,
-                `Full catalog verification ran once at **bot startup**: <t:${Math.floor(startupVoiceVerificationCompletedAt / 1000)}:R>. It will not run again until the next restart.`,
-                "Opening `/voice` or selecting a voice performs **zero** Edge verification requests.",
               ].join("\n")
-            : `## ⚠️ No Verified ${locale} Voices\nNo voice for **${languageLabel}** passed the startup verification sweep. Your existing/default voice was left unchanged. Bozos will test the full catalog again only after the next bot restart.`
+            : `## ⚠️ No Available ${locale} Voices\nEvery statically verified voice for **${languageLabel}** has failed during this process run. Choose another language/accent to clear the runtime failure fallback.`
         ));
 
       return interaction.reply({
@@ -4141,7 +5789,6 @@ async function gracefulShutdown(reason = "shutdown") {
   for (const guildId of [...guildStates.keys()]) {
     destroyGuildState(guildId);
   }
-  voiceVerificationSlotWaiters.splice(0).forEach((resolve) => resolve());
 
   // Give Discord a moment to receive voice-state disconnects before closing WS.
   await wait(250).catch(() => {});
