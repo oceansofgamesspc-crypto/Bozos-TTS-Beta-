@@ -4624,14 +4624,15 @@ client.once(
     });
 
     readyClient.user.setPresence({
-      activities: [
-        {
-          name: "/help • Bozos TTS",
-          type: ActivityType.Custom,
-        },
-      ],
-      status: "online",
-    });
+  activities: [
+    {
+      name: "custom",
+      type: ActivityType.Custom,
+      state: "/help • Bozos TTS",
+    },
+  ],
+  status: "online",
+});
 
     console.log(`[Guilds] Bot is currently in ${readyClient.guilds.cache.size} servers:`);
     readyClient.guilds.cache.forEach((guild) => {
