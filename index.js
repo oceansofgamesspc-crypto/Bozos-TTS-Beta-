@@ -28,6 +28,8 @@ import {
   joinVoiceChannel,
   StreamType,
 } from "@discordjs/voice";
+import { createStaffPlatform } from "./staffPlatform.js";
+import { createClient } from "@supabase/supabase-js";
 
 import { MsEdgeTTS, OUTPUT_FORMAT } from "msedge-tts";
 import { PassThrough } from "node:stream";
@@ -2380,6 +2382,90 @@ const SUPPORT_SERVER_URL = process.env.SUPPORT_SERVER_URL || "https://discord.gg
 
 const SUPPORT_USER_ID = "1458470088759054525";
 
+// Persistent Auto-Join uses the same Supabase project as the Staff Platform,
+// but stays completely inside index.js so the tested production staffPlatform.js
+// and voice-session reconciliation do not need to change.
+const AUTO_JOIN_SUPABASE_URL = process.env.SUPABASE_URL;
+const AUTO_JOIN_SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const autoJoinSupabase =
+  AUTO_JOIN_SUPABASE_URL && AUTO_JOIN_SUPABASE_KEY
+    ? createClient(AUTO_JOIN_SUPABASE_URL, AUTO_JOIN_SUPABASE_KEY, {
+        auth: { persistSession: false },
+      })
+    : null;
+
+const autoJoinConfigs = new Map();
+let autoJoinSchemaWarningShown = false;
+
+async function refreshPersistentAutoJoinConfigs() {
+  autoJoinConfigs.clear();
+  if (!autoJoinSupabase || !client?.isReady?.()) return;
+
+  const { data, error } = await autoJoinSupabase
+    .from("bozos_bot_guilds")
+    .select("guild_id,autojoin_enabled,autojoin_channel_id")
+    .eq("bot_key", "tts")
+    .eq("active", true);
+
+  if (error) {
+    if (!autoJoinSchemaWarningShown) {
+      autoJoinSchemaWarningShown = true;
+      console.warn(
+        "[Auto-Join] Could not load persistent config. Make sure autojoin_enabled and autojoin_channel_id exist in bozos_bot_guilds:",
+        error?.message || error
+      );
+    }
+    return;
+  }
+
+  for (const row of data || []) {
+    const guildId = String(row.guild_id);
+    if (!client.guilds.cache.has(guildId)) continue;
+    if (!row.autojoin_enabled || !row.autojoin_channel_id) continue;
+    autoJoinConfigs.set(guildId, {
+      enabled: true,
+      channelId: String(row.autojoin_channel_id),
+    });
+  }
+}
+
+function getPersistentAutoJoinConfig(guildId) {
+  return autoJoinConfigs.get(String(guildId)) || { enabled: false, channelId: null };
+}
+
+async function setPersistentAutoJoinConfig(guild, enabled, channelId = null) {
+  if (!autoJoinSupabase) {
+    throw new Error("Persistent Auto-Join requires SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.");
+  }
+
+  const { data, error } = await autoJoinSupabase
+    .from("bozos_bot_guilds")
+    .update({
+      autojoin_enabled: Boolean(enabled),
+      autojoin_channel_id: enabled ? String(channelId) : null,
+      last_seen_at: new Date().toISOString(),
+    })
+    .eq("bot_key", "tts")
+    .eq("guild_id", String(guild.id))
+    .select("guild_id")
+    .maybeSingle();
+
+  if (error) {
+    throw new Error(
+      "Could not save Auto-Join. Make sure autojoin_enabled and autojoin_channel_id exist in bozos_bot_guilds."
+    );
+  }
+  if (!data) {
+    throw new Error("This server is not present in bozos_bot_guilds yet. Try again in a few seconds.");
+  }
+
+  if (enabled) {
+    autoJoinConfigs.set(String(guild.id), { enabled: true, channelId: String(channelId) });
+  } else {
+    autoJoinConfigs.delete(String(guild.id));
+  }
+}
+
 // /join activation gate. The support guild ID is resolved once from the existing
 // support invite, so no extra Railway variable is required. SUPPORT_GUILD_ID can
 // still be supplied explicitly as an optional fallback/override.
@@ -3302,10 +3388,15 @@ function humanizeDisplayName(name) {
     .replace(/\s+/g, " ")
     .trim();
 
-  return applyGrandPronunciation(output, { mode: "name" });
+  return staffPlatform.isFeatureEnabled("pronunciation")
+    ? applyGrandPronunciation(output, { mode: "name" })
+    : output;
 }
 
 function applyHumanPronunciation(text, guildId = null, userId = null) {
+  if (!staffPlatform.isFeatureEnabled("pronunciation")) {
+    return String(text ?? "");
+  }
   const languageKey = guildId ? getGuildLanguage(guildId, userId) : "english";
   return applyGrandPronunciation(text, { languageKey, mode: "speech" });
 }
@@ -3327,6 +3418,7 @@ const HELP_CATEGORIES = {
     title: "⚡ Core Commands",
     body:
       "`/join` — Join your current voice channel.\n" +
+      "`/auto-join` — Enable or disable persistent Auto-Join for one VC.\n" +
       "`/leave` — Disconnect from the voice channel.\n" +
       "`/language` — Choose a server or personal language + regional accent.\n" +
       "`/voice` — Choose a male or female neural voice for the active language.\n" +
@@ -3484,6 +3576,16 @@ const commands = [
     .setName("join")
     .setDescription(
       "Join your voice channel and read its chat messages aloud"
+    ),
+
+  new SlashCommandBuilder()
+    .setName("auto-join")
+    .setDescription("Enable or disable persistent Auto-Join for this server")
+    .addBooleanOption((option) =>
+      option
+        .setName("enabled")
+        .setDescription("Enable or disable Auto-Join")
+        .setRequired(true)
     ),
 
   new SlashCommandBuilder()
@@ -3646,6 +3748,7 @@ function createGuildState(guildId) {
     lastQueuedSpeakerId: null,
     lastQueuedSpeakerAt: 0,
     prefetchedJobId: null,
+    connectedAt: null,
   };
 
   player.on("error", (error) => {
@@ -3933,6 +4036,9 @@ async function connectToVoiceChannel(voiceChannel, state) {
   connection.subscribe(state.player);
 
   state.connection = connection;
+  if (!state.connectedAt || state.voiceChannelId !== voiceChannel.id) {
+    state.connectedAt = Date.now();
+  }
   state.voiceChannelId = voiceChannel.id;
   state.lastVoiceChannelId = voiceChannel.id;
   return connection;
@@ -4040,6 +4146,7 @@ function destroyGuildState(guildId) {
   }
 
   guildStates.delete(guildId);
+  void staffPlatform.removeSession(guildId);
 }
 
 
@@ -4065,6 +4172,75 @@ function getHumanMembersInVoiceChannel(
   );
 }
 
+
+function getStaffTtsSessions() {
+  const sessions = [];
+  const botId = client.user?.id;
+
+  for (const [guildId, state] of guildStates.entries()) {
+    if (!state?.voiceChannelId || !state.connection) continue;
+
+    const guild = client.guilds.cache.get(guildId);
+    if (!guild || !botId) continue;
+
+    const actualChannelId =
+      guild.voiceStates.cache.get(botId)?.channelId ||
+      guild.members.me?.voice?.channelId ||
+      null;
+    if (!actualChannelId) continue;
+
+    const channel = guild.channels.cache.get(actualChannelId);
+    if (!channel?.isVoiceBased()) continue;
+
+    const humans = getHumanMembersInVoiceChannel(guild, actualChannelId);
+    sessions.push({
+      guild_id: guildId,
+      guild_name: guild.name,
+      channel_id: actualChannelId,
+      channel_name: channel.name || null,
+      humans_in_vc: humans?.size ?? 0,
+      queue_depth: state.queue.length + (state.currentJob ? 1 : 0),
+      connected_at: new Date(state.connectedAt || Date.now()).toISOString(),
+    });
+  }
+
+  return sessions;
+}
+
+const staffPlatform = createStaffPlatform({
+  client,
+  getSessions: getStaffTtsSessions,
+  getGuildInspector: async (guild) => {
+    const settings = getGuildSettings(guild.id);
+    const state = guildStates.get(guild.id);
+    const selection = getGuildLanguageSelection(guild.id, null);
+    return {
+      tts: {
+        serverLanguage: selection.language,
+        serverAccent: selection.accent,
+        serverVoice: settings.serverVoice || null,
+        volumePercent: Math.round(Number(settings.volume ?? 1) * 100),
+        announcementsEnabled: Boolean(settings.announcements?.enabled),
+        activeSession: state?.voiceChannelId ? {
+          voiceChannelId: state.voiceChannelId,
+          queueDepth: state.queue.length + (state.currentJob ? 1 : 0),
+          connectedAt: state.connectedAt ? new Date(state.connectedAt).toISOString() : null,
+        } : null,
+      },
+    };
+  },
+  disconnectGuild: async (guildId, reason) => {
+    if (!guildStates.has(String(guildId))) return false;
+    console.warn(`[Staff Platform] Ending TTS session in guild ${guildId} (${reason}).`);
+    destroyGuildState(String(guildId));
+    return true;
+  },
+  onFeatureDisabled: async (featureKey) => {
+    if (featureKey !== "tts_playback") return;
+    console.warn("[Staff Platform] Global TTS Playback control disabled. Ending active TTS sessions on this shard.");
+    for (const guildId of [...guildStates.keys()]) destroyGuildState(String(guildId));
+  },
+});
 
 function updateEmptyChannelTimer(guildId) {
   const state =
@@ -4262,9 +4438,392 @@ async function playJoinSound(guildId, state) {
 }
 
 
+
 /* =========================================================
-   MESSAGE QUEUE
+   PERSISTENT AUTO-JOIN V2 — ISOLATED FROM NORMAL /join
 ========================================================= */
+
+const AUTO_JOIN_SCAN_DEBOUNCE_MS = 500;
+const autoJoinRuntime = new Map();
+const manualJoinInFlight = new Set();
+
+function getEnabledAutoJoinConfig(guildId) {
+  const config = getPersistentAutoJoinConfig(guildId);
+  return config?.enabled && config.channelId ? config : null;
+}
+
+function getAutoJoinRuntime(guildId) {
+  const id = String(guildId);
+  let runtime = autoJoinRuntime.get(id);
+  if (!runtime) {
+    runtime = {
+      timer: null,
+      scanPromise: null,
+      connectPromise: null,
+      promptMessage: null,
+      promptChannelId: null,
+    };
+    autoJoinRuntime.set(id, runtime);
+  }
+  return runtime;
+}
+
+function getActualBotVoiceChannelIdForAutoJoin(guild) {
+  const botId = client.user?.id;
+  if (!guild || !botId) return null;
+  return (
+    guild.voiceStates.cache.get(botId)?.channelId ||
+    guild.members.me?.voice?.channelId ||
+    null
+  );
+}
+
+function cancelPendingAutoJoin(guildId) {
+  const runtime = autoJoinRuntime.get(String(guildId));
+  if (!runtime?.timer) return;
+  clearTimeout(runtime.timer);
+  runtime.timer = null;
+}
+
+async function deleteAutoJoinPrompt(guildId) {
+  const runtime = autoJoinRuntime.get(String(guildId));
+  if (!runtime?.promptMessage) return;
+  const message = runtime.promptMessage;
+  runtime.promptMessage = null;
+  runtime.promptChannelId = null;
+  await message.delete().catch(() => {});
+}
+
+function buildAutoJoinVerificationContainer(guildId, channelId) {
+  return new ContainerBuilder()
+    .setAccentColor(COLORS.INFO)
+    .addTextDisplayComponents(
+      new TextDisplayBuilder().setContent(
+        `## 💜 One Quick Step\n` +
+        `Bozos TTS Auto-Join is enabled for <#${channelId}>, but Bozos will only auto-join when at least one person currently in this voice channel is a member of the **Bozos Support Server**.\n\n` +
+        `Join with the button below, then press **I've Joined — Verify Again**. The first eligible person in the VC will automatically bring Bozos TTS in.`
+      )
+    )
+    .addActionRowComponents(
+      new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setLabel("Join Support Server")
+          .setEmoji("💬")
+          .setStyle(ButtonStyle.Link)
+          .setURL(SUPPORT_SERVER_URL),
+        new ButtonBuilder()
+          .setCustomId(`autojoin_verify:${guildId}:${channelId}`)
+          .setLabel("I've Joined — Verify Again")
+          .setEmoji("✅")
+          .setStyle(ButtonStyle.Success)
+      )
+    );
+}
+
+function buildAutoJoinSuccessContainer(channelId) {
+  return new ContainerBuilder()
+    .setAccentColor(COLORS.SUCCESS)
+    .addTextDisplayComponents(
+      new TextDisplayBuilder().setContent(
+        `## 🔊 Bozos TTS Auto-Joined\n` +
+        `Successfully connected to <#${channelId}>.\n\n` +
+        `### How it works\n` +
+        `Messages posted in this voice channel's built-in chat will now be spoken aloud.`
+      )
+    );
+}
+
+function buildAutoJoinFailureContainer(channelId, reason) {
+  return new ContainerBuilder()
+    .setAccentColor(COLORS.ERROR)
+    .addTextDisplayComponents(
+      new TextDisplayBuilder().setContent(
+        `## ⚠️ Auto-Join Couldn't Connect\n` +
+        `Bozos TTS could not automatically connect to <#${channelId}>.\n\n` +
+        `**Reason:** ${String(reason || "Unknown connection error").slice(0, 900)}`
+      )
+    );
+}
+
+async function ensureAutoJoinVerificationPrompt(guild, channel) {
+  const runtime = getAutoJoinRuntime(guild.id);
+  if (runtime.promptMessage && runtime.promptChannelId === channel.id) {
+    return runtime.promptMessage;
+  }
+  if (runtime.promptMessage) await deleteAutoJoinPrompt(guild.id);
+
+  const permissions = channel.permissionsFor(guild.members.me);
+  if (
+    typeof channel.send !== "function" ||
+    !permissions?.has(PermissionFlagsBits.ViewChannel) ||
+    !permissions?.has(PermissionFlagsBits.SendMessages)
+  ) {
+    return null;
+  }
+
+  const message = await channel.send({
+    components: [buildAutoJoinVerificationContainer(guild.id, channel.id)],
+    flags: MessageFlags.IsComponentsV2,
+    allowedMentions: { parse: [] },
+  }).catch((error) => {
+    console.warn(`[Auto-Join] Could not send verification prompt in ${guild.id}:`, error?.message || error);
+    return null;
+  });
+
+  if (message) {
+    runtime.promptMessage = message;
+    runtime.promptChannelId = channel.id;
+  }
+  return message;
+}
+
+async function showAutoJoinResult(guildId, channel, container) {
+  const runtime = getAutoJoinRuntime(guildId);
+  const prompt = runtime.promptMessage;
+  runtime.promptMessage = null;
+  runtime.promptChannelId = null;
+
+  if (prompt) {
+    const edited = await prompt.edit({
+      components: [container],
+      allowedMentions: { parse: [] },
+    }).then(() => true).catch(() => false);
+    if (edited) return;
+  }
+
+  if (typeof channel.send === "function") {
+    await channel.send({
+      components: [container],
+      flags: MessageFlags.IsComponentsV2,
+      allowedMentions: { parse: [] },
+    }).catch(() => {});
+  }
+}
+
+function autoJoinMustBackOff(guild) {
+  const guildId = String(guild.id);
+  return (
+    manualJoinInFlight.has(guildId) ||
+    guildStates.has(guildId) ||
+    Boolean(getVoiceConnection(guildId)) ||
+    Boolean(getActualBotVoiceChannelIdForAutoJoin(guild))
+  );
+}
+
+async function waitForAutoJoinAttempt(guildId) {
+  const runtime = autoJoinRuntime.get(String(guildId));
+  if (!runtime?.connectPromise) return;
+  await runtime.connectPromise.catch(() => false);
+}
+
+async function runNormalJoinWithAutoJoinGuard(interaction) {
+  // Important: when Auto-Join is disabled/unconfigured, /join follows the exact
+  // original path with no Auto-Join bookkeeping, timer, scan, or await.
+  if (!getEnabledAutoJoinConfig(interaction.guildId)) {
+    return handleJoinInteraction(interaction);
+  }
+
+  const guildId = String(interaction.guildId);
+  manualJoinInFlight.add(guildId);
+  cancelPendingAutoJoin(guildId);
+
+  try {
+    // If Auto-Join already owns an in-flight handshake, wait for that one
+    // attempt to finish instead of starting a competing Discord voice handshake.
+    // A slash-command interaction is deferred first so Discord's 3-second
+    // acknowledgement window cannot expire while that isolated attempt finishes.
+    const runtime = autoJoinRuntime.get(guildId);
+    if (
+      runtime?.connectPromise &&
+      interaction.isChatInputCommand?.() &&
+      !interaction.replied &&
+      !interaction.deferred
+    ) {
+      await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => {});
+    }
+    await waitForAutoJoinAttempt(guildId);
+    const result = await handleJoinInteraction(interaction);
+    if (getActualBotVoiceChannelIdForAutoJoin(interaction.guild)) {
+      await deleteAutoJoinPrompt(guildId);
+    }
+    return result;
+  } finally {
+    manualJoinInFlight.delete(guildId);
+  }
+}
+
+async function connectConfiguredAutoJoin(guild, channel) {
+  const guildId = String(guild.id);
+  const config = getEnabledAutoJoinConfig(guildId);
+  if (!config || config.channelId !== channel.id) return false;
+  if (autoJoinMustBackOff(guild)) return false;
+
+  const runtime = getAutoJoinRuntime(guildId);
+  if (runtime.connectPromise) return runtime.connectPromise;
+
+  runtime.connectPromise = (async () => {
+    // This state is created only after proving there is no existing runtime
+    // state or VoiceConnection, so cleanup below can only affect this Auto-Join attempt.
+    const state = getGuildState(guildId);
+
+    try {
+      const latestConfig = getEnabledAutoJoinConfig(guildId);
+      if (
+        !latestConfig ||
+        latestConfig.channelId !== channel.id ||
+        manualJoinInFlight.has(guildId)
+      ) {
+        if (guildStates.get(guildId) === state && !state.voiceChannelId) {
+          guildStates.delete(guildId);
+        }
+        return false;
+      }
+
+      await connectToVoiceChannel(channel, state);
+      clearEmptyChannelTimer(state);
+      await playJoinSound(guildId, state);
+      await showAutoJoinResult(guildId, channel, buildAutoJoinSuccessContainer(channel.id));
+      void staffPlatform.syncSessions();
+      return true;
+    } catch (error) {
+      console.error(`[Auto-Join] Connection failed in guild ${guildId}:`, error);
+
+      // Cleanup only the connection/state created by this Auto-Join attempt.
+      // Cleanup is intentionally limited to the connection/state created here.
+      // The normal production voice lifecycle remains untouched.
+      state.manualDisconnect = true;
+      if (state.reconnectTimer) {
+        clearTimeout(state.reconnectTimer);
+        state.reconnectTimer = null;
+      }
+      const connection = getVoiceConnection(guildId);
+      if (connection) {
+        try { connection.destroy(); } catch {}
+      }
+      try { state.player.stop(true); } catch {}
+      if (guildStates.get(guildId) === state) guildStates.delete(guildId);
+
+      await showAutoJoinResult(
+        guildId,
+        channel,
+        buildAutoJoinFailureContainer(channel.id, error?.message || error)
+      );
+      return false;
+    } finally {
+      runtime.connectPromise = null;
+    }
+  })();
+
+  return runtime.connectPromise;
+}
+
+async function performAutoJoinScan(guildId, preferredUserId = null) {
+  const id = String(guildId);
+  const config = getEnabledAutoJoinConfig(id);
+
+  // Zero-scan path: disabled really means disabled.
+  if (!config) return false;
+  if (isShuttingDown || !staffPlatform.isFeatureEnabled("tts_playback")) return false;
+
+  const guild = client.guilds.cache.get(id);
+  if (!guild || staffPlatform.guildRestriction(id)) return false;
+  if (autoJoinMustBackOff(guild)) {
+    if (getActualBotVoiceChannelIdForAutoJoin(guild)) await deleteAutoJoinPrompt(id);
+    return false;
+  }
+
+  const channel = guild.channels.cache.get(config.channelId) ||
+    await guild.channels.fetch(config.channelId).catch(() => null);
+
+  if (!channel?.isVoiceBased()) {
+    await setPersistentAutoJoinConfig(guild, false, null).catch(() => {});
+    cancelPendingAutoJoin(id);
+    await deleteAutoJoinPrompt(id);
+    return false;
+  }
+
+  const humans = [...channel.members.values()].filter(
+    (member) => !member.user.bot && !staffPlatform.userRestriction(member.id)
+  );
+
+  if (!humans.length) {
+    await deleteAutoJoinPrompt(id);
+    return false;
+  }
+
+  if (preferredUserId) {
+    humans.sort((a, b) => {
+      if (a.id === preferredUserId) return -1;
+      if (b.id === preferredUserId) return 1;
+      return 0;
+    });
+  }
+
+  for (const member of humans) {
+    if (manualJoinInFlight.has(id)) return false;
+
+    const latestConfig = getEnabledAutoJoinConfig(id);
+    if (!latestConfig || latestConfig.channelId !== channel.id) return false;
+
+    const membershipStatus = await getSupportMembershipStatus(member.id);
+    if (membershipStatus === "member") {
+      if (manualJoinInFlight.has(id)) return false;
+      return connectConfiguredAutoJoin(guild, channel);
+    }
+  }
+
+  if (!manualJoinInFlight.has(id) && getEnabledAutoJoinConfig(id)) {
+    await ensureAutoJoinVerificationPrompt(guild, channel);
+  }
+  return false;
+}
+
+async function scanAutoJoin(guildId, preferredUserId = null) {
+  if (!getEnabledAutoJoinConfig(guildId)) return false;
+
+  const runtime = getAutoJoinRuntime(guildId);
+  if (runtime.scanPromise) return runtime.scanPromise;
+
+  runtime.scanPromise = performAutoJoinScan(guildId, preferredUserId)
+    .finally(() => {
+      runtime.scanPromise = null;
+    });
+
+  return runtime.scanPromise;
+}
+
+function scheduleAutoJoin(guildId, delay = AUTO_JOIN_SCAN_DEBOUNCE_MS) {
+  // Disabled/unconfigured guilds never even get a timer.
+  if (!getEnabledAutoJoinConfig(guildId)) return false;
+
+  const runtime = getAutoJoinRuntime(guildId);
+  if (runtime.timer) clearTimeout(runtime.timer);
+
+  runtime.timer = setTimeout(() => {
+    runtime.timer = null;
+    if (!getEnabledAutoJoinConfig(guildId)) return;
+    if (manualJoinInFlight.has(String(guildId))) return;
+
+    void scanAutoJoin(guildId).catch((error) =>
+      console.error(`[Auto-Join] Scan failed in guild ${guildId}:`, error)
+    );
+  }, delay);
+
+  return true;
+}
+
+async function cleanupAutoJoinPromptIfEmpty(guildId) {
+  const config = getEnabledAutoJoinConfig(guildId);
+  if (!config) return;
+
+  const guild = client.guilds.cache.get(String(guildId));
+  const channel = guild?.channels.cache.get(config.channelId);
+  const hasHumans = channel?.isVoiceBased()
+    ? [...channel.members.values()].some((member) => !member.user.bot)
+    : false;
+
+  if (!hasHumans) await deleteAutoJoinPrompt(guildId);
+}
 
 /* =========================================================
    MESSAGE QUEUE (True Streaming + One-Message Prefetch)
@@ -4599,10 +5158,6 @@ function prepareMessageForSpeech(message, userId = null) {
    READY EVENT
 ========================================================= */
 
-/* =========================================================
-   READY EVENT
-========================================================= */
-
 client.once(
   Events.ClientReady,
   async (readyClient) => {
@@ -4633,6 +5188,15 @@ client.once(
   ],
   status: "online",
 });
+
+    await staffPlatform.start();
+    await refreshPersistentAutoJoinConfigs();
+
+    for (const guild of readyClient.guilds.cache.values()) {
+      if (getEnabledAutoJoinConfig(guild.id)) {
+        scheduleAutoJoin(guild.id, 1_000);
+      }
+    }
 
     console.log(`[Guilds] Bot is currently in ${readyClient.guilds.cache.size} servers:`);
     readyClient.guilds.cache.forEach((guild) => {
@@ -4992,6 +5556,22 @@ async function handleJoinInteraction(interaction) {
 client.on(
   Events.InteractionCreate,
   async (interaction) => {
+    if (interaction.inGuild()) {
+      const guildRestriction = staffPlatform.guildRestriction(interaction.guildId);
+      if (guildRestriction) {
+        return interaction.reply({ content: staffPlatform.restrictionText(guildRestriction, "This server"), flags: MessageFlags.Ephemeral }).catch(() => {});
+      }
+      const userRestriction = staffPlatform.userRestriction(interaction.user?.id);
+      if (userRestriction) {
+        return interaction.reply({ content: staffPlatform.restrictionText(userRestriction, "You"), flags: MessageFlags.Ephemeral }).catch(() => {});
+      }
+
+      const customId = String(interaction.customId || "");
+      if ((customId.startsWith("lang_") || customId.startsWith("voice_")) && !staffPlatform.isFeatureEnabled("voice_selection")) {
+        return interaction.reply({ content: staffPlatform.featureDisabledText("voice_selection", "Language & Voice Selection"), flags: MessageFlags.Ephemeral }).catch(() => {});
+      }
+    }
+
     // Seamless support-server membership gate for /join. The button belongs only
     // to the user who originally ran /join and continues the same command flow.
     if (interaction.isButton() && interaction.customId.startsWith("support_join_continue:")) {
@@ -5011,7 +5591,67 @@ client.on(
       }
 
       await interaction.deferUpdate();
-      return handleJoinInteraction(interaction);
+      return getEnabledAutoJoinConfig(interaction.guildId)
+        ? runNormalJoinWithAutoJoinGuard(interaction)
+        : handleJoinInteraction(interaction);
+    }
+
+    if (interaction.isButton() && interaction.customId.startsWith("autojoin_verify:")) {
+      if (!interaction.inGuild()) {
+        return interaction.reply({
+          content: "This button can only be used inside a server.",
+          flags: MessageFlags.Ephemeral,
+        });
+      }
+
+      const [, expectedGuildId, expectedChannelId] = interaction.customId.split(":");
+      const config = getEnabledAutoJoinConfig(interaction.guildId);
+      if (
+        !config ||
+        expectedGuildId !== interaction.guildId ||
+        config.channelId !== expectedChannelId
+      ) {
+        return interaction.reply({
+          content: "This Auto-Join verification is no longer active.",
+          flags: MessageFlags.Ephemeral,
+        });
+      }
+
+      if (interaction.member?.voice?.channelId !== expectedChannelId) {
+        return interaction.reply({
+          content: `You need to still be inside <#${expectedChannelId}> to verify Auto-Join.`,
+          flags: MessageFlags.Ephemeral,
+        });
+      }
+
+      if (manualJoinInFlight.has(String(interaction.guildId))) {
+        return interaction.reply({
+          content: "A normal `/join` is already in progress. Auto-Join will not compete with it.",
+          flags: MessageFlags.Ephemeral,
+        });
+      }
+
+      const membershipStatus = await getSupportMembershipStatus(interaction.user.id);
+      if (membershipStatus === "not_member") {
+        return interaction.reply({
+          content: "I still can't see you in the Bozos Support Server yet. Join it, wait a moment, then verify again.",
+          flags: MessageFlags.Ephemeral,
+        });
+      }
+      if (membershipStatus === "unavailable") {
+        return interaction.reply({
+          content: "Support Server verification is temporarily unavailable. Please try again shortly.",
+          flags: MessageFlags.Ephemeral,
+        });
+      }
+
+      await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+      const joined = await scanAutoJoin(interaction.guildId, interaction.user.id);
+      return interaction.editReply(
+        joined
+          ? "✅ Verified. Bozos TTS Auto-Joined."
+          : "✅ Verified. Auto-Join did not start because a normal voice session or `/join` currently owns this server."
+      );
     }
 
     // Handle Pagination Buttons for /language menu
@@ -5201,13 +5841,131 @@ client.on(
       });
     }
 
+    const commandFeature = (() => {
+      if (["join", "auto-join", "volume", "skip"].includes(interaction.commandName)) return ["tts_playback", "TTS Playback"];
+      if (["language", "voice"].includes(interaction.commandName)) return ["voice_selection", "Language & Voice Selection"];
+      if (interaction.commandName === "announce") return ["announcements", "Voice Announcements"];
+      return null;
+    })();
+    if (commandFeature && !staffPlatform.isFeatureEnabled(commandFeature[0])) {
+      return replyWithV2(interaction, {
+        title: "Feature Temporarily Disabled",
+        description: staffPlatform.featureDisabledText(commandFeature[0], commandFeature[1]),
+        color: COLORS.WARNING,
+        ephemeral: true,
+      });
+    }
+
 
     /* -----------------------------------------------------
        /JOIN
     ----------------------------------------------------- */
 
     if (interaction.commandName === "join") {
-      return handleJoinInteraction(interaction);
+      return getEnabledAutoJoinConfig(interaction.guildId)
+        ? runNormalJoinWithAutoJoinGuard(interaction)
+        : handleJoinInteraction(interaction);
+    }
+
+
+    /* -----------------------------------------------------
+       /AUTO-JOIN
+    ----------------------------------------------------- */
+
+    if (interaction.commandName === "auto-join") {
+      if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) {
+        return replyWithV2(interaction, {
+          title: "Permission Required",
+          description: "You need **Manage Server** to configure Auto-Join.",
+          color: COLORS.ERROR,
+          ephemeral: true,
+        });
+      }
+
+      const enabled = interaction.options.getBoolean("enabled", true);
+      const current = getPersistentAutoJoinConfig(interaction.guildId);
+
+      if (!enabled) {
+        if (!current?.enabled) {
+          return replyWithV2(interaction, {
+            title: "Already Disabled",
+            description: "Auto-Join is already disabled for this server.",
+            color: COLORS.WARNING,
+            ephemeral: true,
+          });
+        }
+
+        try {
+          await setPersistentAutoJoinConfig(interaction.guild, false, null);
+        } catch (error) {
+          return replyWithV2(interaction, {
+            title: "Auto-Join Database Error",
+            description: error?.message || String(error),
+            color: COLORS.ERROR,
+            ephemeral: true,
+          });
+        }
+
+        cancelPendingAutoJoin(interaction.guildId);
+        await deleteAutoJoinPrompt(interaction.guildId);
+        return replyWithV2(interaction, {
+          title: "🔁 Auto-Join Disabled",
+          description: "Bozos TTS Auto-Join is now disabled for this server. Any current live TTS session is left untouched.",
+          color: COLORS.SUCCESS,
+        });
+      }
+
+      const voiceError = requireSameVoiceChannel(interaction);
+      if (voiceError) {
+        return replyWithV2(interaction, {
+          title: "Voice Channel Required",
+          description: `${voiceError}\n\nUse \`/join\` normally first. Once Bozos is connected, run this command again in the same VC.`,
+          color: COLORS.ERROR,
+          ephemeral: true,
+        });
+      }
+
+      const channel = interaction.member.voice.channel;
+      const permissions = channel.permissionsFor(interaction.guild.members.me);
+      if (
+        !permissions?.has(PermissionFlagsBits.ViewChannel) ||
+        !permissions?.has(PermissionFlagsBits.Connect) ||
+        !permissions?.has(PermissionFlagsBits.Speak) ||
+        !permissions?.has(PermissionFlagsBits.SendMessages)
+      ) {
+        return replyWithV2(interaction, {
+          title: "Missing Permissions",
+          description: "Auto-Join needs **View Channel**, **Connect**, **Speak**, and **Send Messages** in this VC.",
+          color: COLORS.ERROR,
+          ephemeral: true,
+        });
+      }
+
+      if (current?.enabled && current.channelId === channel.id) {
+        return replyWithV2(interaction, {
+          title: "Already Enabled",
+          description: `Auto-Join is already enabled for <#${channel.id}>.`,
+          color: COLORS.WARNING,
+          ephemeral: true,
+        });
+      }
+
+      try {
+        await setPersistentAutoJoinConfig(interaction.guild, true, channel.id);
+      } catch (error) {
+        return replyWithV2(interaction, {
+          title: "Auto-Join Database Error",
+          description: error?.message || String(error),
+          color: COLORS.ERROR,
+          ephemeral: true,
+        });
+      }
+
+      return replyWithV2(interaction, {
+        title: "🔁 Auto-Join Enabled",
+        description: `Auto-Join is now enabled for <#${channel.id}> and will persist across restarts. Normal \`/join\` always has priority.`,
+        color: COLORS.SUCCESS,
+      });
     }
 
 
@@ -5581,6 +6339,12 @@ client.on(
       return;
     }
 
+    if (staffPlatform.guildRestriction(message.guildId) || staffPlatform.userRestriction(message.author.id)) {
+      return;
+    }
+
+    if (!staffPlatform.isFeatureEnabled("tts_playback")) return;
+
     const state =
       guildStates.get(
         message.guildId
@@ -5757,8 +6521,9 @@ function getLocalizedAnnouncementText(guildId, member, event) {
 
 function enqueueVoiceAnnouncement(guildId, state, member, event) {
   const settings = getGuildSettings(guildId);
-  if (!settings.announcements.enabled || !state?.voiceChannelId || isShuttingDown) return;
+  if (!staffPlatform.isFeatureEnabled("announcements") || !settings.announcements.enabled || !state?.voiceChannelId || isShuttingDown) return;
   if (!member?.user || member.user.bot) return;
+  if (staffPlatform.guildRestriction(guildId) || staffPlatform.userRestriction(member.id)) return;
 
   const speechText = getLocalizedAnnouncementText(guildId, member, event);
 
@@ -5808,9 +6573,24 @@ client.on(
         console.log(`[Voice] Bot moved to another VC in guild ${guildId}; preserving queued jobs.`);
         state.voiceChannelId = newState.channelId;
         state.lastVoiceChannelId = newState.channelId;
+        state.connectedAt = Date.now();
         updateEmptyChannelTimer(guildId);
+        void staffPlatform.syncSessions();
       }
       return;
+    }
+
+    const autoJoinConfig = getEnabledAutoJoinConfig(guildId);
+    if (autoJoinConfig) {
+      const enteredAutoJoin =
+        oldState.channelId !== autoJoinConfig.channelId &&
+        newState.channelId === autoJoinConfig.channelId;
+      const leftAutoJoin =
+        oldState.channelId === autoJoinConfig.channelId &&
+        newState.channelId !== autoJoinConfig.channelId;
+
+      if (enteredAutoJoin) scheduleAutoJoin(guildId);
+      if (leftAutoJoin) void cleanupAutoJoinPromptIfEmpty(guildId);
     }
 
     const state = guildStates.get(guildId);
@@ -5830,6 +6610,30 @@ client.on(
 );
 
 
+client.on(Events.ChannelDelete, (channel) => {
+  const guildId = channel.guild?.id;
+  if (!guildId) return;
+
+  const config = getEnabledAutoJoinConfig(guildId);
+  if (!config || config.channelId !== channel.id) return;
+
+  cancelPendingAutoJoin(guildId);
+  void deleteAutoJoinPrompt(guildId);
+  void setPersistentAutoJoinConfig(channel.guild, false, null).catch((error) =>
+    console.warn(`[Auto-Join] Could not disable deleted configured channel ${channel.id}:`, error?.message || error)
+  );
+});
+
+client.on(Events.GuildDelete, (guild) => {
+  cancelPendingAutoJoin(guild.id);
+  void deleteAutoJoinPrompt(guild.id);
+  autoJoinRuntime.delete(String(guild.id));
+  manualJoinInFlight.delete(String(guild.id));
+  autoJoinConfigs.delete(String(guild.id));
+  void setPersistentAutoJoinConfig(guild, false, null).catch(() => {});
+});
+
+
 /* =========================================================
    GRACEFUL SHUTDOWN / RAILWAY REDEPLOY
 ========================================================= */
@@ -5843,6 +6647,7 @@ async function gracefulShutdown(reason = "shutdown") {
     destroyGuildState(guildId);
   }
 
+  staffPlatform.stop();
   // Give Discord a moment to receive voice-state disconnects before closing WS.
   await wait(250).catch(() => {});
   try { client.destroy(); } catch {}
