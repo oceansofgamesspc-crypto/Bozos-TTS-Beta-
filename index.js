@@ -28,7 +28,6 @@ import {
   joinVoiceChannel,
   StreamType,
 } from "@discordjs/voice";
-import { createStaffPlatform } from "./staffPlatform.js";
 import { createClient } from "@supabase/supabase-js";
 
 import { MsEdgeTTS, OUTPUT_FORMAT } from "msedge-tts";
@@ -36,6 +35,42 @@ import { PassThrough } from "node:stream";
 
 import fs from "node:fs";
 import path from "node:path";
+
+// Inline lightweight Staff Platform shim for standalone Auto-Join testing.
+// This removes the runtime dependency on ./staffPlatform.js while preserving
+// the same method surface that the rest of index.js expects.
+function createStaffPlatform() {
+  const featureStates = new Map([
+    ["tts_playback", true],
+    ["voice_selection", true],
+    ["pronunciation", true],
+    ["announcements", true],
+  ]);
+
+  return {
+    async start() {
+      console.log("[Staff Platform Shim] Running in standalone test mode.");
+    },
+    stop() {},
+    async syncSessions() {},
+    async removeSession() {},
+    isFeatureEnabled(featureKey) {
+      return featureStates.get(String(featureKey)) !== false;
+    },
+    guildRestriction() {
+      return null;
+    },
+    userRestriction() {
+      return null;
+    },
+    featureDisabledText(featureKey, label = "This feature") {
+      return `${label} is disabled${featureKey ? ` (${featureKey})` : ""}.`;
+    },
+    restrictionText(_restriction, subject = "This") {
+      return `${subject} is currently restricted.`;
+    },
+  };
+}
 
 
 /* =========================================================
@@ -4826,6 +4861,10 @@ async function cleanupAutoJoinPromptIfEmpty(guildId) {
 }
 
 /* =========================================================
+   MESSAGE QUEUE
+========================================================= */
+
+/* =========================================================
    MESSAGE QUEUE (True Streaming + One-Message Prefetch)
 ========================================================= */
 
@@ -5153,6 +5192,10 @@ function prepareMessageForSpeech(message, userId = null) {
 }
 
 
+
+/* =========================================================
+   READY EVENT
+========================================================= */
 
 /* =========================================================
    READY EVENT
