@@ -2,6 +2,7 @@ import { ShardingManager } from "discord.js";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import express from "express";
+import { buildHolographicBetaEntry } from "./holographicBetaBuild.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -9,7 +10,19 @@ const __dirname = path.dirname(__filename);
 /* =========================================================
    1. SHARDING MANAGER
 ========================================================= */
-const manager = new ShardingManager(path.join(__dirname, "index.js"), {
+const holographicBetaEntry = path.join(__dirname, ".holographic-beta-index.generated.js");
+
+try {
+  buildHolographicBetaEntry(
+    path.join(__dirname, "index.js"),
+    holographicBetaEntry
+  );
+} catch (error) {
+  console.error("[Holographic Beta] Failed to build the shard entry:", error);
+  process.exit(1);
+}
+
+const manager = new ShardingManager(holographicBetaEntry, {
   token: process.env.DISCORD_TOKEN,
   totalShards: "auto",
 });
