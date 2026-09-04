@@ -109,8 +109,8 @@ function createHolographicVoiceStream(inputStream, state, userId = null) {
   const leftDelay = pan > 0 ? lateralDelayMs : 0;
   const rightDelay = pan < 0 ? lateralDelayMs : 0;
   const filter = [
-    `pan=stereo|c0=${leftGain}*c0|c1=${rightGain}*c0`,
-    `adelay=${leftDelay}|${rightDelay}`,
+    "pan=stereo|c0=" + leftGain + "*c0|c1=" + rightGain + "*c0",
+    "adelay=" + leftDelay + "|" + rightDelay,
     "aecho=0.86:0.70:42|86:0.045|0.025",
   ].join(",");
 
@@ -149,7 +149,11 @@ function createHolographicVoiceStream(inputStream, state, userId = null) {
   ffmpeg.once("close", (code, signal) => {
     if (code && signal !== "SIGKILL") {
       holographicAudioRuntimeAvailable = false;
-      console.error(`[Holographic] FFmpeg exited with code ${code}. Falling back to normal TTS on future messages.${stderr ? ` ${stderr.trim()}` : ""}`);
+      console.error(
+        "[Holographic] FFmpeg exited with code " + code +
+        ". Falling back to normal TTS on future messages." +
+        (stderr ? " " + stderr.trim() : "")
+      );
     }
   });
 
